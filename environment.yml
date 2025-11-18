@@ -1,0 +1,19 @@
+name: gait_analysis
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - scikit-learn
+  - matplotlib
+  - opencv
+  - scipy
+  - pip
+  - tqdm
+  - ezc3d
+  - colorama
+  - pip:
+    - mediapipe
