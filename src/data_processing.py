@@ -74,7 +74,7 @@ def process_video_to_skeleton(video_path: str) -> np.ndarray:
     for i, frame_data in enumerate(all_landmarks_list):
         if frame_data is not None:
             data_with_gaps[i] = frame_data
-
+            
     # corrected_data = correct_coordinates(data_with_gaps)
 
     # データクレンジングパイプライン
