@@ -17,20 +17,24 @@ def train_one_epoch(model, data_loader, loss_fn, optimizer, device, model_type):
     total_samples = 0
     
     for data in tqdm(data_loader, desc="Training"):
-        # 根據模型類型解包數據，並移動到指定設備 (CPU/GPU)
-        if model_type == 'late_fusion':
+        # ★★★ 修正點 1：將 partition_fusion 加入判斷條件 ★★★
+        if model_type == 'late_fusion' or model_type == 'partition_fusion':
+            # 解包三個變數
             skeletons, subspace_features, labels = data
-            skeletons, subspace_features, labels = skeletons.to(device), subspace_features.to(device), labels.to(device)
+            skeletons = skeletons.to(device)
+            subspace_features = subspace_features.to(device)
+            labels = labels.to(device)
         else: # baseline 模式
             skeletons, labels = data
-            skeletons, labels = skeletons.to(device), labels.to(device)
+            skeletons = skeletons.to(device)
+            labels = labels.to(device)
         
         # 清空梯度
         optimizer.zero_grad()
         
-        # --- ★★★ 核心修正點 ★★★ ---
-        # 模型內部會自己處理 edge_index，所以這裡不再需要傳遞它
-        if model_type == 'late_fusion':
+        # ★★★ 修正點 2：根據模式傳入正確參數 ★★★
+        if model_type == 'late_fusion' or model_type == 'partition_fusion':
+            # 這兩個模式都需要兩個輸入
             outputs = model(skeletons, subspace_features)
         else: # baseline 模式
             outputs = model(skeletons)
@@ -64,16 +68,19 @@ def evaluate(model, data_loader, loss_fn, device, label_encoder, model_type):
     
     with torch.no_grad():
         for data in tqdm(data_loader, desc="Evaluating"):
-            if model_type == 'late_fusion':
+            # ★★★ 修正點 3：Evaluation 迴圈也要同步修正 ★★★
+            if model_type == 'late_fusion' or model_type == 'partition_fusion':
                 skeletons, subspace_features, labels = data
-                skeletons, subspace_features, labels = skeletons.to(device), subspace_features.to(device), labels.to(device)
+                skeletons = skeletons.to(device)
+                subspace_features = subspace_features.to(device)
+                labels = labels.to(device)
             else: # baseline 模式
                 skeletons, labels = data
-                skeletons, labels = skeletons.to(device), labels.to(device)
+                skeletons = skeletons.to(device)
+                labels = labels.to(device)
 
-            # --- ★★★ 核心修正點 ★★★ ---
-            # 這裡同樣不再傳遞 edge_index
-            if model_type == 'late_fusion':
+            # ★★★ 修正點 4：傳入參數 ★★★
+            if model_type == 'late_fusion' or model_type == 'partition_fusion':
                 outputs = model(skeletons, subspace_features)
             else: # baseline 模式
                 outputs = model(skeletons)
@@ -104,4 +111,3 @@ def evaluate(model, data_loader, loss_fn, device, label_encoder, model_type):
     plt.title('Confusion Matrix')
     
     return avg_loss, accuracy, report, fig
-
