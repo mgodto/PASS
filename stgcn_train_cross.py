@@ -13,12 +13,10 @@ from src.stgcn.stgcn_dataset import GaitDataset
 from src.stgcn.stgcn_models import STGCN_Baseline, STGCN_LateFusion, STGCN_PartitionFusion
 # ★★★ 注意：這裡導入的 evaluate 已經是我們剛修改過會回傳 F1 的版本 ★★★
 from src.stgcn.stgcn_engine import train_one_epoch, evaluate
-from src.config import SVM_FEATURES_PATH, LABELS_PATH, STGCN_PATHS_PATH
+from src.config import SVM_FEATURES_PATH, LABELS_PATH, STGCN_PATHS_PATH, PARTITION_NPY_DIR
 
 from sklearn.utils.class_weight import compute_class_weight
 
-# Partition NPY 路徑
-PARTITION_NPY_DIR = "/Users/gaoji/projects/human_gait/results/partition_npy"
 
 def train_fold(fold_idx, train_dataset, test_dataset, dataset_full, args, output_dir, device):
     """

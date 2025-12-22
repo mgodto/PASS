@@ -3,6 +3,7 @@ import numpy as np
 from torch.utils.data import Dataset
 from sklearn.preprocessing import LabelEncoder
 import os
+from src.config import PARTITION_NPY_DIR
 
 # --- 輔助函數：讀取特徵長度 (舊版功能保留) ---
 def read_feature_lengths(info_path='results/train/feature_lengths.txt'):
@@ -100,7 +101,7 @@ class GaitDataset(Dataset):
         elif self.mode == 'partition_fusion':
             if not self.partition_features_dir:
                 # 預設路徑防呆
-                self.partition_features_dir = "/Users/gaoji/projects/human_gait/results/partition_npy"
+                self.partition_features_dir = PARTITION_NPY_DIR
             
             if not os.path.exists(self.partition_features_dir):
                 print(f"嚴重警告: 找不到 Partition 特徵資料夾: {self.partition_features_dir}")

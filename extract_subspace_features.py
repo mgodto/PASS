@@ -17,7 +17,10 @@ from config import Confing
 from utils import gen_shape_subspace, cal_magnitude, gen_shape_principal_com_subspace
 
 # ★★★ 強制設定輸出路徑 ★★★
-FIXED_OUTPUT_DIR = "/Users/gaoji/projects/human_gait/results/partition_npy"
+from src.config import PARTITION_NPY_DIR
+
+# ★★★ 強制設定輸出路徑 ★★★
+FIXED_OUTPUT_DIR = PARTITION_NPY_DIR
 
 # ==========================================
 # 1. 定義特徵計算設定

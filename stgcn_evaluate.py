@@ -1,62 +1,24 @@
 import torch
 import argparse
-import numpy as np
-import pandas as pd
-import seaborn as sns
 import matplotlib.pyplot as plt
 import os
 from torch.utils.data import DataLoader, random_split
-from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
-from torchinfo import summary
 from tqdm import tqdm
 
 # 從 src 導入必要的模組
 from src.stgcn.stgcn_dataset import GaitDataset
 from src.stgcn.stgcn_models import STGCN_Baseline, STGCN_LateFusion, STGCN_PartitionFusion
-from src.config import SVM_FEATURES_PATH, LABELS_PATH, STGCN_PATHS_PATH
-
-# 定義 Partition NPY 路徑
-PARTITION_NPY_DIR = "/Users/gaoji/projects/human_gait/results/partition_npy"
+from src.stgcn.stgcn_metrics import (
+    format_classification_report_percent,
+    plot_confusion_matrix,
+)
+from src.config import SVM_FEATURES_PATH, LABELS_PATH, STGCN_PATHS_PATH, PARTITION_NPY_DIR
 
 def get_formatted_classification_report(y_true, y_pred, class_names):
     """
     生成百分比格式的 Classification Report (文字表格)
     """
-    # 1. 獲取原始字典
-    report_dict = classification_report(y_true, y_pred, target_names=class_names, output_dict=True, zero_division=0)
-    
-    # 2. 提取 accuracy
-    accuracy_score_val = report_dict.pop('accuracy')
-    
-    # 3. 轉為 DataFrame
-    df = pd.DataFrame(report_dict).transpose()
-    
-    # 4. 格式化函數 (轉為 %)
-    def fmt_pct(x): return f"{x:.2%}"
-    
-    # 5. 將數值欄位轉為百分比
-    for col in ['precision', 'recall', 'f1-score']:
-        df[col] = df[col].apply(fmt_pct)
-    
-    # 6. Support 轉為整數字串
-    df['support'] = df['support'].apply(lambda x: str(int(x)))
-    
-    # 7. 手動構建 Accuracy 行
-    total_support = df.loc['macro avg', 'support']
-    accuracy_row = pd.DataFrame({
-        'precision': [''],   
-        'recall': [''],      
-        'f1-score': [fmt_pct(accuracy_score_val)],
-        'support': [total_support]
-    }, index=['accuracy'])
-    
-    # 8. 重新排序：類別 -> Accuracy -> Macro/Weighted Avg
-    avgs = df.loc[['macro avg', 'weighted avg']]
-    classes = df.drop(['macro avg', 'weighted avg'])
-    
-    final_df = pd.concat([classes, accuracy_row, avgs])
-    
-    return final_df.to_string(), accuracy_score_val
+    return format_classification_report_percent(y_true, y_pred, class_names)
 
 def evaluate_model(model, data_loader, device, label_encoder, model_type):
     model.eval()
@@ -95,17 +57,12 @@ def evaluate_model(model, data_loader, device, label_encoder, model_type):
     report_str, accuracy = get_formatted_classification_report(y_true_str, y_pred_str, class_names)
     
     # 2. 繪製混淆矩陣 (改回顯示整數數量)
-    cm = confusion_matrix(y_true_str, y_pred_str, labels=class_names)
-    
-    fig, ax = plt.subplots(figsize=(8, 6))
-    
-    # ★★★ 修正點：使用 fmt='d' (整數)，不再做 Normalize ★★★
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                xticklabels=class_names, yticklabels=class_names)
-    
-    plt.ylabel('Actual Class')
-    plt.xlabel('Predicted Class')
-    plt.title(f'Confusion Matrix ({model_type}) - Counts')
+    fig = plot_confusion_matrix(
+        y_true_str,
+        y_pred_str,
+        class_names,
+        title=f'Confusion Matrix ({model_type}) - Counts',
+    )
     
     return accuracy, report_str, fig, len(all_labels)
 

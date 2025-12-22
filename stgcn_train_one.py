@@ -12,11 +12,10 @@ import matplotlib.pyplot as plt
 from src.stgcn.stgcn_dataset import GaitDataset
 from src.stgcn.stgcn_models import STGCN_Baseline, STGCN_LateFusion, STGCN_PartitionFusion
 from src.stgcn.stgcn_engine import train_one_epoch, evaluate
-from src.config import SVM_FEATURES_PATH, LABELS_PATH, STGCN_PATHS_PATH
+from src.config import SVM_FEATURES_PATH, LABELS_PATH, STGCN_PATHS_PATH, PARTITION_NPY_DIR
 
 from sklearn.utils.class_weight import compute_class_weight
 
-PARTITION_NPY_DIR = "/Users/gaoji/projects/human_gait/results/partition_npy"
 
 def main(args):
     # 設定隨機種子以確保數據分割的一致性
@@ -140,7 +139,9 @@ def main(args):
         print(f"\n--- Epoch {epoch+1}/{args.epochs} ---")
         
         train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device, args.model)
-        test_loss, test_acc, report, cm_fig = evaluate(model, test_loader, criterion, device, dataset.le, args.model)
+        test_loss, test_acc, _test_f1, report, cm_fig = evaluate(
+            model, test_loader, criterion, device, dataset.le, args.model
+        )
         
         print(f"Epoch {epoch+1} Results: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2%}, Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.2%}")
         
@@ -212,4 +213,3 @@ if __name__ == '__main__':
     # --- 新增結束 ---
     args = parser.parse_args()
     main(args)
-

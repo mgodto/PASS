@@ -6,6 +6,7 @@ PROCESSED_SKELETON_DIR = 'data/processed_skeletons'
 C3D_DIR = 'data/c3d_files'
 GIF_DIR = 'results/gifs'
 SUBSPACE_NPY_DIR = 'results/subspace_npy'
+PARTITION_NPY_DIR = "/Users/gaoji/projects/human_gait/results/partition_npy"
 
 # 外部腳本所在的目錄
 VISUAL_CONTRIBUTION_SCRIPT_DIR = 'src/cv_motion3d_public-main/src'

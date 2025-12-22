@@ -13,12 +13,10 @@ from src.stgcn.stgcn_dataset import GaitDataset
 # ★★★ Import 新的模型 Class
 from src.stgcn.stgcn_models import STGCN_Baseline, STGCN_LateFusion, STGCN_PartitionFusion
 from src.stgcn.stgcn_engine import train_one_epoch, evaluate
-from src.config import SVM_FEATURES_PATH, LABELS_PATH, STGCN_PATHS_PATH
+from src.config import SVM_FEATURES_PATH, LABELS_PATH, STGCN_PATHS_PATH, PARTITION_NPY_DIR
 
 from sklearn.utils.class_weight import compute_class_weight
 
-# ★★★ 定義 Partition NPY 預設路徑 (請依實際情況修改) ★★★
-PARTITION_NPY_DIR = "/Users/gaoji/projects/human_gait/results/partition_npy"
 
 def main(args):
     # 設定隨機種子
@@ -127,7 +125,9 @@ def main(args):
         
         # 呼叫 engine 進行訓練與評估 (Engine 已在之前修正過，支持 partition_fusion)
         train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device, args.model)
-        test_loss, test_acc, report, cm_fig = evaluate(model, test_loader, criterion, device, dataset.le, args.model)
+        test_loss, test_acc, _test_f1, report, cm_fig = evaluate(
+            model, test_loader, criterion, device, dataset.le, args.model
+        )
         
         # Scheduler Step
         if scheduler:
