@@ -12,36 +12,44 @@ EDGES = [
 ]
 
 class STGCN_Baseline(nn.Module):
-    # (保持不變)
+    """純ST-GCN模型"""
     def __init__(self, num_nodes=33, num_classes=4):
         super().__init__()
+        
         edge_index_tensor = torch.tensor(EDGES, dtype=torch.long).t().contiguous()
         self.register_buffer('edge_index', edge_index_tensor)
+        
         self.st_blocks = nn.ModuleList([
             STGCNBlock(in_channels=3, out_channels=64, kernel_size=9),
             STGCNBlock(in_channels=64, out_channels=128, kernel_size=9),
             STGCNBlock(in_channels=128, out_channels=256, kernel_size=9)
         ])
+        
         self.fc = nn.Linear(256, num_classes)
 
-    def forward(self, x):
+    def forward(self, x): # <-- 只接收 x 作為參數
         for block in self.st_blocks:
-            x = block(x, self.edge_index)
+            x = block(x, self.edge_index) # <-- 內部使用 self.edge_index
+        
         x = x.mean(dim=[2, 3])
         return self.fc(x)
 
 class STGCN_LateFusion(nn.Module):
-    # (保持不變)
+    """帶有後期融合的ST-GCN模型"""
     def __init__(self, num_nodes=33, num_subspace_features=0, num_classes=4):
         super().__init__()
+        
         edge_index_tensor = torch.tensor(EDGES, dtype=torch.long).t().contiguous()
         self.register_buffer('edge_index', edge_index_tensor)
+        
         self.st_feature_extractor = nn.ModuleList([
             STGCNBlock(in_channels=3, out_channels=64, kernel_size=9),
             STGCNBlock(in_channels=64, out_channels=128, kernel_size=9),
             STGCNBlock(in_channels=128, out_channels=256, kernel_size=9)
         ])
+        
         st_gcn_output_dim = 256
+        
         fused_dim = st_gcn_output_dim + num_subspace_features
         self.fusion_head = nn.Sequential(
             nn.Linear(fused_dim, 128),
@@ -50,21 +58,22 @@ class STGCN_LateFusion(nn.Module):
             nn.Linear(128, num_classes)
         )
 
-    def forward(self, skeleton_data, subspace_features):
+    def forward(self, skeleton_data, subspace_features): # <-- 只接收骨架和特徵
         x = skeleton_data
         for block in self.st_feature_extractor:
-            x = block(x, self.edge_index)
+            x = block(x, self.edge_index) # <-- 內部使用 self.edge_index
+
         skeleton_features = x.mean(dim=[2, 3])
         fused_vector = torch.cat([skeleton_features, subspace_features], dim=1)
         return self.fusion_head(fused_vector)
 
-# --- ★★★ 核心修改的 Class ★★★ ---
+
 class STGCN_PartitionFusion(nn.Module):
     """
-    針對新版 Partition 特徵的融合模型
-    包含 Batch Normalization 層以解決特徵數量級不匹配問題
+    針對新版 14維 Partition 特徵的 Naïve Fusion 模型
+    直接將 256維 ST-GCN 特徵與 14維 物理特徵串接
     """
-    def __init__(self, num_nodes=33, num_classes=4, subspace_dim=42): # 這裡預設為 42 (14*3)
+    def __init__(self, num_nodes=33, num_classes=4, subspace_dim=14):
         super().__init__()
         
         edge_index_tensor = torch.tensor(EDGES, dtype=torch.long).t().contiguous()
@@ -79,16 +88,13 @@ class STGCN_PartitionFusion(nn.Module):
         
         st_gcn_output_dim = 256
         
-        # ★★★ 新增: Batch Normalization 層 ★★★
-        # 用於將輸入的物理特徵 (Max/Mean/Std) 歸一化，使其與 ST-GCN 特徵分佈更接近
-        self.subspace_bn = nn.BatchNorm1d(subspace_dim)
-        
-        # 融合層：256 + 42 = 298
+        # 融合層：256 + 14 = 270
         fused_dim = st_gcn_output_dim + subspace_dim
         
+        # Naïve Fusion Head (直接過 FC)
         self.fusion_head = nn.Sequential(
             nn.Linear(fused_dim, 128),
-            nn.ReLU(),
+            nn.ReLU(), # 可以加個非線性
             nn.Dropout(0.5),
             nn.Linear(128, num_classes)
         )
@@ -99,14 +105,12 @@ class STGCN_PartitionFusion(nn.Module):
         for block in self.st_feature_extractor:
             x = block(x, self.edge_index)
 
-        # Global Average Pooling -> (N, 256)
+        # Global Average Pooling (N, 256, T, V) -> (N, 256)
         skeleton_features = x.mean(dim=[2, 3])
         
-        # 2. ★★★ 特徵歸一化 ★★★
-        # subspace_features shape: (N, 42)
-        subspace_features = self.subspace_bn(subspace_features)
-        
-        # 3. 融合與分類
+        # 2. 特徵融合
+        # subspace_features shape: (N, 14)
         fused_vector = torch.cat([skeleton_features, subspace_features], dim=1)
         
+        # 3. 分類
         return self.fusion_head(fused_vector)

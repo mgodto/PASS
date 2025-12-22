@@ -2,10 +2,52 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 import pandas as pd
-from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
+from sklearn.metrics import classification_report, accuracy_score, confusion_matrix, f1_score
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
+import numpy as np
+
+def get_formatted_report_string(y_true, y_pred, class_names):
+    """
+    輔助函數：將分類報告轉換為百分比格式 (xx.xx%) 的字串表格
+    """
+    # 1. 獲取原始字典
+    report_dict = classification_report(y_true, y_pred, target_names=class_names, output_dict=True, zero_division=0)
+    
+    # 2. 提取 accuracy
+    accuracy_score_val = report_dict.pop('accuracy')
+    
+    # 3. 轉為 DataFrame
+    df = pd.DataFrame(report_dict).transpose()
+    
+    # 4. 格式化函數 (轉為 %)
+    def fmt_pct(x): return f"{x:.2%}"
+    
+    # 5. 將數值欄位轉為百分比
+    for col in ['precision', 'recall', 'f1-score']:
+        df[col] = df[col].apply(fmt_pct)
+    
+    # 6. Support 轉為整數字串
+    df['support'] = df['support'].apply(lambda x: str(int(x)))
+    
+    # 7. 手動構建 Accuracy 行
+    # 為了讓它出現在表格中間或最後，我們手動建立這一行
+    total_support = df.loc['macro avg', 'support']
+    accuracy_row = pd.DataFrame({
+        'precision': [''],   
+        'recall': [''],      
+        'f1-score': [fmt_pct(accuracy_score_val)],
+        'support': [total_support]
+    }, index=['accuracy'])
+    
+    # 8. 重新排序：類別 -> Accuracy -> Macro/Weighted Avg
+    avgs = df.loc[['macro avg', 'weighted avg']]
+    classes = df.drop(['macro avg', 'weighted avg'])
+    
+    final_df = pd.concat([classes, accuracy_row, avgs])
+    
+    return final_df.to_string()
 
 def train_one_epoch(model, data_loader, loss_fn, optimizer, device, model_type):
     """
@@ -17,36 +59,32 @@ def train_one_epoch(model, data_loader, loss_fn, optimizer, device, model_type):
     total_samples = 0
     
     for data in tqdm(data_loader, desc="Training"):
-        # ★★★ 修正點 1：將 partition_fusion 加入判斷條件 ★★★
+        # 解包邏輯
         if model_type == 'late_fusion' or model_type == 'partition_fusion':
-            # 解包三個變數
             skeletons, subspace_features, labels = data
             skeletons = skeletons.to(device)
             subspace_features = subspace_features.to(device)
             labels = labels.to(device)
-        else: # baseline 模式
+        else: 
             skeletons, labels = data
             skeletons = skeletons.to(device)
             labels = labels.to(device)
         
-        # 清空梯度
         optimizer.zero_grad()
         
-        # ★★★ 修正點 2：根據模式傳入正確參數 ★★★
+        # Forward pass
         if model_type == 'late_fusion' or model_type == 'partition_fusion':
-            # 這兩個模式都需要兩個輸入
             outputs = model(skeletons, subspace_features)
-        else: # baseline 模式
+        else:
             outputs = model(skeletons)
             
-        # 計算損失
         loss = loss_fn(outputs, labels)
         
-        # 反向傳播與優化
+        # Backward pass
         loss.backward()
         optimizer.step()
         
-        # 統計數據
+        # 統計
         total_loss += loss.item()
         _, predicted = torch.max(outputs.data, 1)
         total_samples += labels.size(0)
@@ -68,21 +106,21 @@ def evaluate(model, data_loader, loss_fn, device, label_encoder, model_type):
     
     with torch.no_grad():
         for data in tqdm(data_loader, desc="Evaluating"):
-            # ★★★ 修正點 3：Evaluation 迴圈也要同步修正 ★★★
+            # 解包
             if model_type == 'late_fusion' or model_type == 'partition_fusion':
                 skeletons, subspace_features, labels = data
                 skeletons = skeletons.to(device)
                 subspace_features = subspace_features.to(device)
                 labels = labels.to(device)
-            else: # baseline 模式
+            else:
                 skeletons, labels = data
                 skeletons = skeletons.to(device)
                 labels = labels.to(device)
 
-            # ★★★ 修正點 4：傳入參數 ★★★
+            # Forward
             if model_type == 'late_fusion' or model_type == 'partition_fusion':
                 outputs = model(skeletons, subspace_features)
-            else: # baseline 模式
+            else:
                 outputs = model(skeletons)
                 
             loss = loss_fn(outputs, labels)
@@ -94,15 +132,18 @@ def evaluate(model, data_loader, loss_fn, device, label_encoder, model_type):
             
     avg_loss = total_loss / len(data_loader)
     
-    # 將數字標籤轉回原始字串標籤
+    # 轉回字串標籤
     y_true_str = label_encoder.inverse_transform(all_labels)
     y_pred_str = label_encoder.inverse_transform(all_preds)
     class_names = label_encoder.classes_
 
     accuracy = accuracy_score(y_true_str, y_pred_str)
-    report = classification_report(y_true_str, y_pred_str, zero_division=0)
+    f1 = f1_score(y_true_str, y_pred_str, average='macro')
     
-    # 繪製混淆矩陣
+    # ★★★ 修改點：使用自定義函數生成百分比格式的報告 ★★★
+    report = get_formatted_report_string(y_true_str, y_pred_str, class_names)
+    
+    # 繪製混淆矩陣 (維持整數顯示)
     cm = confusion_matrix(y_true_str, y_pred_str, labels=class_names)
     fig, ax = plt.subplots(figsize=(8, 6))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
@@ -110,4 +151,4 @@ def evaluate(model, data_loader, loss_fn, device, label_encoder, model_type):
     plt.xlabel('Predicted Class')
     plt.title('Confusion Matrix')
     
-    return avg_loss, accuracy, report, fig
+    return avg_loss, accuracy, f1, report, fig
