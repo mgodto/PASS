@@ -41,14 +41,17 @@ def train_fold(fold_idx, train_dataset, test_dataset, dataset_full, args, output
     train_indices = train_dataset.indices
     train_labels = dataset_full.labels[train_indices]
     
-    class_weights = compute_class_weight(
-        'balanced',
-        classes=np.unique(dataset_full.labels),
-        y=train_labels
-    )
-    class_weights = torch.tensor(class_weights, dtype=torch.float).to(device)
-    
     if args.use_class_weights:
+        train_classes = np.unique(train_labels)
+        class_weights = compute_class_weight(
+            'balanced',
+            classes=train_classes,
+            y=train_labels
+        )
+        class_weights_full = np.ones(dataset_full.num_classes, dtype=np.float32)
+        for class_id, weight in zip(train_classes, class_weights):
+            class_weights_full[int(class_id)] = weight
+        class_weights = torch.tensor(class_weights_full, dtype=torch.float).to(device)
         print(f"Fold {fold_idx} Class Weights: {class_weights.cpu().numpy()}")
         criterion = nn.CrossEntropyLoss(weight=class_weights)
     else:
@@ -229,6 +232,9 @@ if __name__ == '__main__':
     parser.add_argument('--max_len', type=int, default=300)
     parser.add_argument('--fusion_features', type=str, default='both', choices=['first', 'second', 'both'])
     parser.add_argument('--use_class_weights', default=True, action='store_true')
+    parser.add_argument('--no_class_weights', action='store_true')
     
     args = parser.parse_args()
+    if args.no_class_weights:
+        args.use_class_weights = False
     main(args)

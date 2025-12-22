@@ -22,6 +22,18 @@ def read_feature_lengths(info_path='results/train/feature_lengths.txt'):
 class GaitDataset(Dataset):
     """用於ST-GCN訓練的自定義數據集"""
 
+    def _infer_subspace_feature_dim(self):
+        if self.all_subspace_features is None:
+            return None
+        feats = np.asarray(self.all_subspace_features)
+        if feats.ndim >= 2:
+            return int(feats.shape[1])
+        if feats.ndim == 1 and len(feats) > 0:
+            first = np.asarray(feats[0])
+            if first.ndim >= 1:
+                return int(first.shape[0])
+        return None
+
     def __init__(self, stgcn_paths_file, labels_file, subspace_features_file,
                  mode='baseline', max_len=300, fusion_features='both',
                  partition_features_dir=None): # ★★★ 新增參數
@@ -66,6 +78,24 @@ class GaitDataset(Dataset):
             else:
                 self.num_selected_subspace_features = self.num_total_subspace_features
 
+            feature_dim = self._infer_subspace_feature_dim()
+            if feature_dim is not None:
+                expected_dim = self.max_len_first + self.max_len_second
+                if expected_dim == 0 and self.fusion_features in ('both', 'second'):
+                    self.num_total_subspace_features = feature_dim
+                    self.num_selected_subspace_features = feature_dim
+                elif expected_dim > 0 and expected_dim != feature_dim:
+                    if self.max_len_first > feature_dim:
+                        self.max_len_first = feature_dim
+                    self.max_len_second = max(feature_dim - self.max_len_first, 0)
+                    self.num_total_subspace_features = self.max_len_first + self.max_len_second
+                    if self.fusion_features == 'first':
+                        self.num_selected_subspace_features = self.max_len_first
+                    elif self.fusion_features == 'second':
+                        self.num_selected_subspace_features = self.max_len_second
+                    else:
+                        self.num_selected_subspace_features = self.num_total_subspace_features
+
         # --- ★★★ 新版 Partition Fusion 初始化 ★★★ ---
         elif self.mode == 'partition_fusion':
             if not self.partition_features_dir:
@@ -86,10 +116,12 @@ class GaitDataset(Dataset):
         # 1. 讀取骨架數據 (保持不變)
         try:
             skeleton_data = np.load(self.stgcn_paths[index])
-        except:
+        except Exception:
             # 回傳全 0 以避免崩潰 (根據 mode 回傳不同維度的特徵占位符)
-            feat_dim = self.num_selected_subspace_features if self.num_selected_subspace_features > 0 else 1
-            return torch.zeros((3, self.max_len, 33)), torch.zeros((feat_dim,)), torch.tensor(-1, dtype=torch.long)
+            if self.mode in ('late_fusion', 'partition_fusion'):
+                feat_dim = self.num_selected_subspace_features if self.num_selected_subspace_features > 0 else 1
+                return torch.zeros((3, self.max_len, 33)), torch.zeros((feat_dim,)), torch.tensor(-1, dtype=torch.long)
+            return torch.zeros((3, self.max_len, 33)), torch.tensor(-1, dtype=torch.long)
 
         # Padding / Truncating (保持不變)
         num_frames = skeleton_data.shape[0]

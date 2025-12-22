@@ -57,6 +57,7 @@ def train_one_epoch(model, data_loader, loss_fn, optimizer, device, model_type):
     total_loss = 0
     correct_predictions = 0
     total_samples = 0
+    processed_batches = 0
     
     for data in tqdm(data_loader, desc="Training"):
         # 解包邏輯
@@ -69,6 +70,16 @@ def train_one_epoch(model, data_loader, loss_fn, optimizer, device, model_type):
             skeletons, labels = data
             skeletons = skeletons.to(device)
             labels = labels.to(device)
+
+        valid_mask = labels >= 0
+        if not valid_mask.all().item():
+            valid_count = int(valid_mask.sum().item())
+            if valid_count == 0:
+                continue
+            skeletons = skeletons[valid_mask]
+            labels = labels[valid_mask]
+            if model_type == 'late_fusion' or model_type == 'partition_fusion':
+                subspace_features = subspace_features[valid_mask]
         
         optimizer.zero_grad()
         
@@ -89,8 +100,11 @@ def train_one_epoch(model, data_loader, loss_fn, optimizer, device, model_type):
         _, predicted = torch.max(outputs.data, 1)
         total_samples += labels.size(0)
         correct_predictions += (predicted == labels).sum().item()
+        processed_batches += 1
         
-    avg_loss = total_loss / len(data_loader)
+    if processed_batches == 0 or total_samples == 0:
+        return 0.0, 0.0
+    avg_loss = total_loss / processed_batches
     accuracy = correct_predictions / total_samples
     return avg_loss, accuracy
 
@@ -103,6 +117,7 @@ def evaluate(model, data_loader, loss_fn, device, label_encoder, model_type):
     total_loss = 0
     all_preds = []
     all_labels = []
+    processed_batches = 0
     
     with torch.no_grad():
         for data in tqdm(data_loader, desc="Evaluating"):
@@ -117,6 +132,16 @@ def evaluate(model, data_loader, loss_fn, device, label_encoder, model_type):
                 skeletons = skeletons.to(device)
                 labels = labels.to(device)
 
+            valid_mask = labels >= 0
+            if not valid_mask.all().item():
+                valid_count = int(valid_mask.sum().item())
+                if valid_count == 0:
+                    continue
+                skeletons = skeletons[valid_mask]
+                labels = labels[valid_mask]
+                if model_type == 'late_fusion' or model_type == 'partition_fusion':
+                    subspace_features = subspace_features[valid_mask]
+
             # Forward
             if model_type == 'late_fusion' or model_type == 'partition_fusion':
                 outputs = model(skeletons, subspace_features)
@@ -129,8 +154,14 @@ def evaluate(model, data_loader, loss_fn, device, label_encoder, model_type):
             _, predicted = torch.max(outputs.data, 1)
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
+            processed_batches += 1
             
-    avg_loss = total_loss / len(data_loader)
+    avg_loss = total_loss / processed_batches if processed_batches > 0 else 0.0
+    if len(all_labels) == 0:
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.text(0.5, 0.5, "No valid samples", ha='center', va='center')
+        ax.axis('off')
+        return avg_loss, 0.0, 0.0, "No valid samples", fig
     
     # 轉回字串標籤
     y_true_str = label_encoder.inverse_transform(all_labels)
