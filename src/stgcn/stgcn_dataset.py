@@ -109,6 +109,26 @@ class GaitDataset(Dataset):
             # ★★★ 修改：特徵維度變為 42 (14部位 * 3統計量) ★★★
             self.num_selected_subspace_features = 14 * 3 
             print(f"Mode 'partition_fusion' active. Input Feature Dim: {self.num_selected_subspace_features} (14 parts x 3 stats)")
+        elif self.mode == 'partition_fusion_attn':
+            if not self.partition_features_dir:
+                self.partition_features_dir = PARTITION_NPY_DIR
+            if not os.path.exists(self.partition_features_dir):
+                print(f"嚴重警告: 找不到 Partition 特徵資料夾: {self.partition_features_dir}")
+            self.num_selected_subspace_features = 14 * 3
+            print(f"Mode 'partition_fusion_attn' active. Input Feature Dim: {self.num_selected_subspace_features} (14 parts x 3 stats)")
+        elif self.mode == 'partition_fusion_conv':
+            if not self.partition_features_dir:
+                self.partition_features_dir = PARTITION_NPY_DIR
+            if not os.path.exists(self.partition_features_dir):
+                print(f"嚴重警告: 找不到 Partition 特徵資料夾: {self.partition_features_dir}")
+            self.num_selected_subspace_features = 14
+            self.part_feature_dim = 2
+            self.num_parts = self.num_selected_subspace_features // self.part_feature_dim
+            print(
+                "Mode 'partition_fusion_conv' active. "
+                f"Input Feature Dim: {self.num_selected_subspace_features} "
+                f"(parts: {self.num_parts} x {self.part_feature_dim})"
+            )
 
     def __len__(self):
         return len(self.labels)
@@ -119,7 +139,17 @@ class GaitDataset(Dataset):
             skeleton_data = np.load(self.stgcn_paths[index])
         except Exception:
             # 回傳全 0 以避免崩潰 (根據 mode 回傳不同維度的特徵占位符)
+            if self.mode == 'partition_fusion_conv':
+                feat_dim = self.num_selected_subspace_features if self.num_selected_subspace_features > 0 else 1
+                return (
+                    torch.zeros((3, self.max_len, 33)),
+                    torch.zeros((self.max_len, feat_dim)),
+                    torch.tensor(-1, dtype=torch.long),
+                )
             if self.mode in ('late_fusion', 'partition_fusion'):
+                feat_dim = self.num_selected_subspace_features if self.num_selected_subspace_features > 0 else 1
+                return torch.zeros((3, self.max_len, 33)), torch.zeros((feat_dim,)), torch.tensor(-1, dtype=torch.long)
+            if self.mode == 'partition_fusion_attn':
                 feat_dim = self.num_selected_subspace_features if self.num_selected_subspace_features > 0 else 1
                 return torch.zeros((3, self.max_len, 33)), torch.zeros((feat_dim,)), torch.tensor(-1, dtype=torch.long)
             return torch.zeros((3, self.max_len, 33)), torch.tensor(-1, dtype=torch.long)
@@ -181,6 +211,59 @@ class GaitDataset(Dataset):
             except Exception as e:
                 # print(f"Warning: Failed to load {feature_filename}: {e}")
                 selected_subspace_feature = torch.zeros((self.num_selected_subspace_features,), dtype=torch.float)
+
+            return tensor_data, selected_subspace_feature, label
+        elif self.mode == 'partition_fusion_attn':
+            filename = os.path.basename(self.stgcn_paths[index])
+            feature_filename = filename.replace('.npy', '_subspace_features.npy')
+            feature_path = os.path.join(self.partition_features_dir, feature_filename)
+
+            try:
+                feat_seq = np.load(feature_path)
+
+                if feat_seq.shape[0] > 0:
+                    feat_max = np.max(feat_seq, axis=0)
+                    feat_mean = np.mean(feat_seq, axis=0)
+                    feat_std = np.std(feat_seq, axis=0)
+
+                    feature_vector = np.concatenate([feat_max, feat_mean, feat_std])
+                else:
+                    feature_vector = np.zeros(self.num_selected_subspace_features)
+
+                selected_subspace_feature = torch.from_numpy(feature_vector).float()
+
+            except Exception as e:
+                selected_subspace_feature = torch.zeros((self.num_selected_subspace_features,), dtype=torch.float)
+
+            return tensor_data, selected_subspace_feature, label
+        elif self.mode == 'partition_fusion_conv':
+            filename = os.path.basename(self.stgcn_paths[index])
+            feature_filename = filename.replace('.npy', '_subspace_features.npy')
+            feature_path = os.path.join(self.partition_features_dir, feature_filename)
+
+            try:
+                feat_seq = np.load(feature_path)
+                feat_seq = np.asarray(feat_seq)
+                if feat_seq.ndim == 1:
+                    feat_seq = feat_seq.reshape(1, -1)
+
+                if feat_seq.shape[1] != self.num_selected_subspace_features:
+                    raise ValueError(
+                        f"Unexpected feature dim {feat_seq.shape[1]} (expected {self.num_selected_subspace_features})"
+                    )
+
+                if feat_seq.shape[0] < self.max_len:
+                    padding = np.zeros((self.max_len - feat_seq.shape[0], feat_seq.shape[1]))
+                    feat_seq = np.concatenate([feat_seq, padding], axis=0)
+                elif feat_seq.shape[0] > self.max_len:
+                    feat_seq = feat_seq[:self.max_len, :]
+
+                selected_subspace_feature = torch.from_numpy(feat_seq).float()
+            except Exception:
+                selected_subspace_feature = torch.zeros(
+                    (self.max_len, self.num_selected_subspace_features),
+                    dtype=torch.float,
+                )
 
             return tensor_data, selected_subspace_feature, label
 

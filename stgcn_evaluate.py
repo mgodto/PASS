@@ -7,7 +7,13 @@ from tqdm import tqdm
 
 # 從 src 導入必要的模組
 from src.stgcn.stgcn_dataset import GaitDataset
-from src.stgcn.stgcn_models import STGCN_Baseline, STGCN_LateFusion, STGCN_PartitionFusion
+from src.stgcn.stgcn_models import (
+    STGCN_Baseline,
+    STGCN_LateFusion,
+    STGCN_PartitionFusion,
+    STGCN_PartitionFusionConv,
+    STGCN_PartitionFusionAttention,
+)
 from src.stgcn.stgcn_metrics import (
     format_classification_report_percent,
     plot_confusion_matrix,
@@ -28,7 +34,7 @@ def evaluate_model(model, data_loader, device, label_encoder, model_type):
     with torch.no_grad():
         for data in tqdm(data_loader, desc="Evaluating"):
             # 解包數據
-            if model_type == 'late_fusion' or model_type == 'partition_fusion':
+            if model_type in ('late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn'):
                 skeletons, subspace_features, labels = data
                 skeletons = skeletons.to(device)
                 subspace_features = subspace_features.to(device)
@@ -39,7 +45,7 @@ def evaluate_model(model, data_loader, device, label_encoder, model_type):
                 labels = labels.to(device)
 
             # 模型推論
-            if model_type == 'late_fusion' or model_type == 'partition_fusion':
+            if model_type in ('late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn'):
                 outputs = model(skeletons, subspace_features)
             else:
                 outputs = model(skeletons)
@@ -115,6 +121,19 @@ def main(args):
     elif args.model == 'partition_fusion':
         print(f"Initializing STGCN_PartitionFusion with {num_feats} features...")
         model = STGCN_PartitionFusion(num_classes=num_classes, subspace_dim=num_feats).to(device)
+    elif args.model == 'partition_fusion_conv':
+        print(f"Initializing STGCN_PartitionFusionConv with {num_feats} features...")
+        model = STGCN_PartitionFusionConv(
+            num_classes=num_classes,
+            subspace_dim=num_feats,
+            part_feat_dim=getattr(full_dataset, "part_feature_dim", 2),
+        ).to(device)
+    elif args.model == 'partition_fusion_attn':
+        print(f"Initializing STGCN_PartitionFusionAttention with {num_feats} features...")
+        model = STGCN_PartitionFusionAttention(
+            num_classes=num_classes,
+            subspace_dim=num_feats,
+        ).to(device)
         
     # 載入權重
     print(f"Loading weights from: {args.weights}")
@@ -160,7 +179,7 @@ def main(args):
 if __name__ == '__main__':
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, required=True, choices=['baseline', 'late_fusion', 'partition_fusion'])
+    parser.add_argument('--model', type=str, required=True, choices=['baseline', 'late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn'])
     parser.add_argument('--weights', type=str, required=True)
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--max_len', type=int, default=300)

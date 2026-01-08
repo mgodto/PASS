@@ -11,7 +11,13 @@ import matplotlib.pyplot as plt
 # 確保能從src資料夾導入我們需要的模組
 from src.stgcn.stgcn_dataset import GaitDataset
 # ★★★ Import 新的模型 Class
-from src.stgcn.stgcn_models import STGCN_Baseline, STGCN_LateFusion, STGCN_PartitionFusion
+from src.stgcn.stgcn_models import (
+    STGCN_Baseline,
+    STGCN_LateFusion,
+    STGCN_PartitionFusion,
+    STGCN_PartitionFusionConv,
+    STGCN_PartitionFusionAttention,
+)
 from src.stgcn.stgcn_engine import train_one_epoch, evaluate
 from src.config import SVM_FEATURES_PATH, LABELS_PATH, STGCN_PATHS_PATH, PARTITION_NPY_DIR
 
@@ -36,6 +42,10 @@ def main(args):
     # 若為 partition 模式，加上標籤
     if args.model == 'partition_fusion':
         fusion_tag = "_partition-stats" # 標記使用了統計特徵
+    elif args.model == 'partition_fusion_conv':
+        fusion_tag = "_partition-conv"
+    elif args.model == 'partition_fusion_attn':
+        fusion_tag = "_partition-attn"
 
     weight_tag = "_weighted" if args.use_class_weights else ""
     experiment_name = f"{args.model}{fusion_tag}{weight_tag}_lr{args.lr}_bs{args.batch_size}_{timestamp}"
@@ -93,6 +103,19 @@ def main(args):
             num_classes=dataset.num_classes,
             subspace_dim=num_selected_subspace_features # 傳入 42
         ).to(device)
+    elif args.model == 'partition_fusion_conv':
+        print(f"Initializing STGCN_PartitionFusionConv with {num_selected_subspace_features} features...")
+        model = STGCN_PartitionFusionConv(
+            num_classes=dataset.num_classes,
+            subspace_dim=num_selected_subspace_features,
+            part_feat_dim=getattr(dataset, "part_feature_dim", 2),
+        ).to(device)
+    elif args.model == 'partition_fusion_attn':
+        print(f"Initializing STGCN_PartitionFusionAttention with {num_selected_subspace_features} features...")
+        model = STGCN_PartitionFusionAttention(
+            num_classes=dataset.num_classes,
+            subspace_dim=num_selected_subspace_features,
+        ).to(device)
     
     else:
         raise ValueError("Invalid model type specified.")
@@ -124,7 +147,9 @@ def main(args):
         print(f"\n--- Epoch {epoch+1}/{args.epochs} ---")
         
         # 呼叫 engine 進行訓練與評估 (Engine 已在之前修正過，支持 partition_fusion)
-        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device, args.model)
+        train_loss, train_acc = train_one_epoch(
+            model, train_loader, criterion, optimizer, device, args.model
+        )
         test_loss, test_acc, _test_f1, report, cm_fig = evaluate(
             model, test_loader, criterion, device, dataset.le, args.model
         )
@@ -132,7 +157,7 @@ def main(args):
         # Scheduler Step
         if scheduler:
             scheduler.step()
-        print(f"Learning rate in this epoch: {scheduler.get_last_lr()[0]:.6f}")
+            print(f"Learning rate in this epoch: {scheduler.get_last_lr()[0]:.6f}")
         print(f"Epoch {epoch+1} Results: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2%}, Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.2%}")
         
         train_losses.append(train_loss)
@@ -186,7 +211,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='ST-GCN Training Script')
     # ★★★ 加入 partition_fusion 選項
     parser.add_argument('--model', type=str, required=True, 
-                        choices=['baseline', 'late_fusion', 'partition_fusion'], 
+                        choices=['baseline', 'late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn'],
                         help='Model type to train')
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')

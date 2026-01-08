@@ -10,7 +10,13 @@ import matplotlib.pyplot as plt
 
 # 確保能從src資料夾導入我們需要的模組
 from src.stgcn.stgcn_dataset import GaitDataset
-from src.stgcn.stgcn_models import STGCN_Baseline, STGCN_LateFusion, STGCN_PartitionFusion
+from src.stgcn.stgcn_models import (
+    STGCN_Baseline,
+    STGCN_LateFusion,
+    STGCN_PartitionFusion,
+    STGCN_PartitionFusionConv,
+    STGCN_PartitionFusionAttention,
+)
 # ★★★ 注意：這裡導入的 evaluate 已經是我們剛修改過會回傳 F1 的版本 ★★★
 from src.stgcn.stgcn_engine import train_one_epoch, evaluate
 from src.config import SVM_FEATURES_PATH, LABELS_PATH, STGCN_PATHS_PATH, PARTITION_NPY_DIR
@@ -71,6 +77,17 @@ def train_fold(fold_idx, train_dataset, test_dataset, dataset_full, args, output
             num_classes=num_classes,
             subspace_dim=num_selected_subspace_features
         ).to(device)
+    elif args.model == 'partition_fusion_conv':
+        model = STGCN_PartitionFusionConv(
+            num_classes=num_classes,
+            subspace_dim=num_selected_subspace_features,
+            part_feat_dim=getattr(dataset_full, "part_feature_dim", 2),
+        ).to(device)
+    elif args.model == 'partition_fusion_attn':
+        model = STGCN_PartitionFusionAttention(
+            num_classes=num_classes,
+            subspace_dim=num_selected_subspace_features,
+        ).to(device)
     else:
         raise ValueError("Invalid model type")
 
@@ -87,7 +104,9 @@ def train_fold(fold_idx, train_dataset, test_dataset, dataset_full, args, output
 
     for epoch in range(args.epochs):
         # ★★★ 修正解包：現在 evaluate 會回傳 f1 ★★★
-        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device, args.model)
+        train_loss, train_acc = train_one_epoch(
+            model, train_loader, criterion, optimizer, device, args.model
+        )
         test_loss, test_acc, test_f1, report, cm_fig = evaluate(model, test_loader, criterion, device, dataset_full.le, args.model)
         
         if scheduler: scheduler.step()
@@ -154,7 +173,13 @@ def main(args):
     # 實驗命名
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     fusion_tag = f"_{args.fusion_features}" if args.model == 'late_fusion' else ""
-    if args.model == 'partition_fusion': fusion_tag = "_partition"
+    if args.model == 'partition_fusion':
+        fusion_tag = "_partition"
+    elif args.model == 'partition_fusion_conv':
+        fusion_tag = "_partition-conv"
+    elif args.model == 'partition_fusion_attn':
+        fusion_tag = "_partition-attn"
+
     
     experiment_name = f"{args.model}{fusion_tag}_{args.k_folds}Fold_bs{args.batch_size}_{timestamp}"
     output_dir = os.path.join('results', 'kfold_experiments', experiment_name)
@@ -222,7 +247,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, required=True, choices=['baseline', 'late_fusion', 'partition_fusion'])
+    parser.add_argument('--model', type=str, required=True, choices=['baseline', 'late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn'])
     parser.add_argument('--k_folds', type=int, default=5)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=16)
