@@ -57,16 +57,8 @@ def main(args):
     num_classes = len(le.classes_)
 
     # 2. 建立數據集
-    # dataset = VideoDataset(file_paths, labels, num_frames=args.num_frames)
-    
-    # train_size = int(0.8 * len(dataset))
-    # test_size = len(dataset) - train_size
-    # train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
-    # ---- 1) 先固定資料順序（很重要，避免不同機器 glob 順序不同）----
     file_paths = sorted(file_paths)
     labels = np.array(labels)  # 與 file_paths 對齊
-
-    # ---- 2) 建立 Dataset ----
     dataset = VideoDataset(file_paths, labels, num_frames=args.num_frames)
 
     # ---- 3) 用固定 seed 的 random_split 切 80/20 ----
@@ -101,17 +93,6 @@ def main(args):
     print("Building 3D-CNN model...")
     model = Simple3DCNN(num_classes=num_classes).to(device)
 
-    # 4. 損失函數與優化器
-
-    # class_weights = compute_class_weight(
-    # 'balanced',
-    # classes=np.unique(dataset.labels),
-    # y=dataset.labels
-    # )
-
-    # class_weights = torch.tensor(class_weights, dtype=torch.float).to(device)
-    # loss_fn = nn.CrossEntropyLoss(weight=class_weights)
-
     loss_fn = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -133,7 +114,6 @@ def main(args):
         test_losses.append(test_loss)
         train_accs.append(train_acc)
         test_accs.append(test_acc)
-        # --- 新增結束 ---
 
         print(f"Epoch {epoch+1} Results: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2%}, Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.2%}")
         
@@ -190,15 +170,4 @@ if __name__ == '__main__':
     parser.add_argument('--num_frames', type=int, default=16, help='Number of frames to sample from each video')
     args = parser.parse_args()
     main(args)
-
-
-### **如何執行您的比較實驗**
-
-# 1.  **確認原始影片路徑**：
-#     確保您的`src/config.py`檔案中的`RAW_VIDEO_DIR`變數正確地指向了包含所有原始步態影片的資料夾。
-
-# 2.  **執行訓練**：
-#     在您的專案根目錄下，執行以下指令來開始3D-CNN模型的訓練。
-#     ```bash
-#     python train_3dcnn.py
     

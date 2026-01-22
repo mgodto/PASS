@@ -33,7 +33,7 @@ def _filter_valid_samples(skeletons, subspace_features, labels, model_type):
     # 找出正常的標籤 (Dataset 讀取失敗時會回傳 -1)
     valid_mask = labels >= 0
     
-    # 如果全部都是正常的，直接回傳 (節省記憶體複製時間)
+    # 如果全部都是正常的，直接回傳 
     if valid_mask.all().item():
         return skeletons, subspace_features, labels
     
@@ -83,7 +83,7 @@ def train_one_epoch(model, data_loader, loss_fn, optimizer, device, model_type):
         # 1. 解包
         skeletons, subspace_features, labels = _unpack_batch(data, device, model_type)
         
-        # 2. 過濾壞檔 (關鍵步驟！)
+        # 2. 過濾壞檔 
         skeletons, subspace_features, labels = _filter_valid_samples(
             skeletons,
             subspace_features,
@@ -135,8 +135,8 @@ def evaluate(model, data_loader, loss_fn, device, label_encoder, model_type):
         for data in tqdm(data_loader, desc="Evaluating"):
             # 1. 解包
             skeletons, subspace_features, labels = _unpack_batch(data, device, model_type)
-            
-            # 2. 過濾壞檔 (關鍵步驟！)
+
+            # 2. 過濾壞檔
             # 這保證了 all_labels 裡面絕對不會混入 -1
             skeletons, subspace_features, labels = _filter_valid_samples(
                 skeletons,
