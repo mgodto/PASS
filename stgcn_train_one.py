@@ -46,7 +46,12 @@ def main(args):
         fusion_tag = "_partition-attn"
     # --- ★★★ 新增：在實驗名稱中加入是否使用類別權重的標記 ★★★ ---
     weight_tag = "_weighted" if args.use_class_weights else ""
-    experiment_name = f"{args.model}{fusion_tag}{weight_tag}_lr{args.lr}_bs{args.batch_size}_{timestamp}"
+    hand_tag = ""
+    if args.model in ('partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn'):
+        if args.partition_hand_mode != "both":
+            hand_tag = f"_hands-{args.partition_hand_mode}"
+
+    experiment_name = f"{args.model}{fusion_tag}{hand_tag}{weight_tag}_lr{args.lr}_bs{args.batch_size}_{timestamp}"
     output_dir = os.path.join('results', experiment_name)
     os.makedirs(output_dir, exist_ok=True)
     print(f"本次實驗結果將儲存於: {output_dir}")
@@ -65,7 +70,8 @@ def main(args):
             max_len=args.max_len,
             fusion_features=args.fusion_features,  # <-- 將參數傳遞給 Dataset
             # ★★★ 傳入新特徵路徑
-            partition_features_dir=PARTITION_NPY_DIR
+            partition_features_dir=PARTITION_NPY_DIR,
+            partition_hand_mode=args.partition_hand_mode,
         )
     except FileNotFoundError as e:
          print(f"Error initializing dataset: {e}")
@@ -97,10 +103,10 @@ def main(args):
         ).to(device)
     # ★★★ 新增 Partition Fusion 分支
     elif args.model == 'partition_fusion':
-        print("Initializing STGCN_PartitionFusion with 14 extra features...")
+        print(f"Initializing STGCN_PartitionFusion with {num_selected_subspace_features} features...")
         model = STGCN_PartitionFusion(
             num_classes=dataset.num_classes,
-            subspace_dim=14
+            subspace_dim=num_selected_subspace_features
         ).to(device)
     elif args.model == 'partition_fusion_conv':
         print(f"Initializing STGCN_PartitionFusionConv with {num_selected_subspace_features} features...")
@@ -234,6 +240,13 @@ if __name__ == '__main__':
     parser.add_argument('--max_len', type=int, default=300, help='Maximum sequence length for padding/truncating')
     parser.add_argument('--fusion_features', type=str, default='both', choices=['first', 'second', 'both'], 
                         help="Which subspace features to use in late_fusion mode ('first', 'second', or 'both')")
+    parser.add_argument(
+        '--partition_hand_mode',
+        type=str,
+        default='both',
+        choices=['both', 'none', 'left', 'right'],
+        help="Partition 手部特徵選擇: both | none | left | right (外側手請選對應的左右)",
+    )
     # --- ★★★ 新增：控制是否使用類別權重的參數 ★★★ ---
     parser.add_argument('--use_class_weights', default=True, action='store_true', 
                         help='Apply class weighting to the loss function to handle imbalance.')

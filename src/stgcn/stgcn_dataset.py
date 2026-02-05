@@ -5,7 +5,19 @@ from sklearn.preprocessing import LabelEncoder
 import os
 from src.config import PARTITION_NPY_DIR
 
-# --- 輔助函數：讀取特徵長度 (舊版功能保留) ---
+PARTITION_PARTS = (
+    "Full Body",
+    "Head",
+    "Trunk",
+    "Left Arm",
+    "Right Arm",
+    "Left Leg",
+    "Right Leg",
+)
+PARTITION_HAND_PARTS = ("Left Arm", "Right Arm")
+PARTITION_PART_FEATURE_DIM = 2
+
+# --- 輔助函數：讀取特徵長度 ---
 def read_feature_lengths(info_path='results/train/feature_lengths.txt'):
     lengths = {'max_len_first': 0, 'max_len_second': 0}
     if os.path.exists(info_path):
@@ -37,10 +49,11 @@ class GaitDataset(Dataset):
 
     def __init__(self, stgcn_paths_file, labels_file, subspace_features_file,
                  mode='baseline', max_len=300, fusion_features='both',
-                 partition_features_dir=None): # ★★★ 新增參數
+                 partition_features_dir=None, partition_hand_mode='both'): # ★★★ 新增參數
         """
         Args:
             partition_features_dir (str): 存放新版 14維特徵 (.npy) 的資料夾路徑。
+            partition_hand_mode (str): 'both' | 'none' | 'left' | 'right'
         """
         print(f"Initializing GaitDataset in mode: {mode}")
         
@@ -57,12 +70,13 @@ class GaitDataset(Dataset):
         self.max_len = max_len
         self.fusion_features = fusion_features
         self.partition_features_dir = partition_features_dir
+        self.partition_hand_mode = partition_hand_mode
 
         self.le = LabelEncoder()
         self.labels = self.le.fit_transform(self.labels_str)
         self.num_classes = len(self.le.classes_)
 
-        # --- 舊版 Late Fusion 初始化 (保持不變) ---
+        # --- 舊版 Late Fusion 初始化 ---
         self.all_subspace_features = None
         self.max_len_first, self.max_len_second = read_feature_lengths()
         self.num_total_subspace_features = self.max_len_first + self.max_len_second
@@ -105,33 +119,117 @@ class GaitDataset(Dataset):
             
             if not os.path.exists(self.partition_features_dir):
                 print(f"嚴重警告: 找不到 Partition 特徵資料夾: {self.partition_features_dir}")
-            
-            # ★★★ 修改：特徵維度變為 42 (14部位 * 3統計量) ★★★
-            self.num_selected_subspace_features = 14 * 3 
-            print(f"Mode 'partition_fusion' active. Input Feature Dim: {self.num_selected_subspace_features} (14 parts x 3 stats)")
+
+            self.part_feature_dim = PARTITION_PART_FEATURE_DIM
+            self.selected_part_names = self._select_partition_parts(self.partition_hand_mode)
+            self.selected_part_indices = self._build_part_indices(self.selected_part_names)
+            self.selected_feature_indices = self._build_feature_indices(self.selected_part_indices)
+
+            # ★★★ 修改：特徵維度依據部位數量動態調整 ★★★
+            self.num_selected_subspace_features = len(self.selected_part_indices) * self.part_feature_dim * 3
+            print(
+                "Mode 'partition_fusion' active. "
+                f"Input Feature Dim: {self.num_selected_subspace_features} "
+                f"({len(self.selected_part_indices)} parts x {self.part_feature_dim} feats x 3 stats)"
+            )
+            print(f"Selected parts: {self.selected_part_names}")
         elif self.mode == 'partition_fusion_attn':
             if not self.partition_features_dir:
                 self.partition_features_dir = PARTITION_NPY_DIR
             if not os.path.exists(self.partition_features_dir):
                 print(f"嚴重警告: 找不到 Partition 特徵資料夾: {self.partition_features_dir}")
-            self.num_selected_subspace_features = 14 * 3
-            print(f"Mode 'partition_fusion_attn' active. Input Feature Dim: {self.num_selected_subspace_features} (14 parts x 3 stats)")
+
+            self.part_feature_dim = PARTITION_PART_FEATURE_DIM
+            self.selected_part_names = self._select_partition_parts(self.partition_hand_mode)
+            self.selected_part_indices = self._build_part_indices(self.selected_part_names)
+            self.selected_feature_indices = self._build_feature_indices(self.selected_part_indices)
+
+            self.num_selected_subspace_features = len(self.selected_part_indices) * self.part_feature_dim * 3
+            print(
+                "Mode 'partition_fusion_attn' active. "
+                f"Input Feature Dim: {self.num_selected_subspace_features} "
+                f"({len(self.selected_part_indices)} parts x {self.part_feature_dim} feats x 3 stats)"
+            )
+            print(f"Selected parts: {self.selected_part_names}")
         elif self.mode == 'partition_fusion_conv':
             if not self.partition_features_dir:
                 self.partition_features_dir = PARTITION_NPY_DIR
             if not os.path.exists(self.partition_features_dir):
                 print(f"嚴重警告: 找不到 Partition 特徵資料夾: {self.partition_features_dir}")
-            self.num_selected_subspace_features = 14
-            self.part_feature_dim = 2
+
+            self.part_feature_dim = PARTITION_PART_FEATURE_DIM
+            self.selected_part_names = self._select_partition_parts(self.partition_hand_mode)
+            self.selected_part_indices = self._build_part_indices(self.selected_part_names)
+            self.selected_feature_indices = self._build_feature_indices(self.selected_part_indices)
+
+            self.num_selected_subspace_features = len(self.selected_part_indices) * self.part_feature_dim
             self.num_parts = self.num_selected_subspace_features // self.part_feature_dim
             print(
                 "Mode 'partition_fusion_conv' active. "
                 f"Input Feature Dim: {self.num_selected_subspace_features} "
                 f"(parts: {self.num_parts} x {self.part_feature_dim})"
             )
+            print(f"Selected parts: {self.selected_part_names}")
 
     def __len__(self):
         return len(self.labels)
+
+    @staticmethod
+    def _select_partition_parts(hand_mode):
+        if hand_mode not in ("both", "none", "left", "right"):
+            raise ValueError(
+                "Invalid partition_hand_mode. Expected one of: 'both', 'none', 'left', 'right'"
+            )
+        if hand_mode == "both":
+            allowed_hands = set(PARTITION_HAND_PARTS)
+        elif hand_mode == "left":
+            allowed_hands = {"Left Arm"}
+        elif hand_mode == "right":
+            allowed_hands = {"Right Arm"}
+        else:
+            allowed_hands = set()
+
+        selected = []
+        for part in PARTITION_PARTS:
+            if part in PARTITION_HAND_PARTS:
+                if part in allowed_hands:
+                    selected.append(part)
+            else:
+                selected.append(part)
+        return selected
+
+    @staticmethod
+    def _build_part_indices(part_names):
+        return [PARTITION_PARTS.index(name) for name in part_names]
+
+    @staticmethod
+    def _build_feature_indices(part_indices):
+        feature_indices = []
+        for part_idx in part_indices:
+            base = part_idx * PARTITION_PART_FEATURE_DIM
+            feature_indices.extend([base, base + 1])
+        return np.asarray(feature_indices, dtype=int)
+
+    def _select_feature_columns(self, feat_seq):
+        if self.mode not in ("partition_fusion", "partition_fusion_attn", "partition_fusion_conv"):
+            return feat_seq
+        if not hasattr(self, "selected_feature_indices"):
+            return feat_seq
+
+        feat_seq = np.asarray(feat_seq)
+        if feat_seq.ndim == 1:
+            feat_seq = feat_seq.reshape(1, -1)
+
+        raw_dim = feat_seq.shape[1]
+        expected_raw_dim = len(PARTITION_PARTS) * PARTITION_PART_FEATURE_DIM
+        expected_selected_dim = len(self.selected_feature_indices)
+        if raw_dim == expected_raw_dim:
+            return feat_seq[:, self.selected_feature_indices]
+        if raw_dim == expected_selected_dim:
+            return feat_seq
+        raise ValueError(
+            f"Unexpected feature dim {raw_dim} (expected {expected_raw_dim} or {expected_selected_dim})"
+        )
 
     def __getitem__(self, index):
         # 1. 讀取骨架數據 (保持不變)
@@ -154,7 +252,7 @@ class GaitDataset(Dataset):
                 return torch.zeros((3, self.max_len, 33)), torch.zeros((feat_dim,)), torch.tensor(-1, dtype=torch.long)
             return torch.zeros((3, self.max_len, 33)), torch.tensor(-1, dtype=torch.long)
 
-        # Padding / Truncating (保持不變)
+        # Padding / Truncating
         num_frames = skeleton_data.shape[0]
         if num_frames < self.max_len:
             padding = np.zeros((self.max_len - num_frames, 33, 3))
@@ -191,6 +289,7 @@ class GaitDataset(Dataset):
             try:
                 # 讀取特徵 (Frames, 14)
                 feat_seq = np.load(feature_path)
+                feat_seq = self._select_feature_columns(feat_seq)
                 
                 if feat_seq.shape[0] > 0:
                     # ★★★ 核心修改：統計池化 (Statistical Pooling) ★★★
@@ -220,6 +319,7 @@ class GaitDataset(Dataset):
 
             try:
                 feat_seq = np.load(feature_path)
+                feat_seq = self._select_feature_columns(feat_seq)
 
                 if feat_seq.shape[0] > 0:
                     feat_max = np.max(feat_seq, axis=0)
@@ -243,9 +343,7 @@ class GaitDataset(Dataset):
 
             try:
                 feat_seq = np.load(feature_path)
-                feat_seq = np.asarray(feat_seq)
-                if feat_seq.ndim == 1:
-                    feat_seq = feat_seq.reshape(1, -1)
+                feat_seq = self._select_feature_columns(feat_seq)
 
                 if feat_seq.shape[1] != self.num_selected_subspace_features:
                     raise ValueError(

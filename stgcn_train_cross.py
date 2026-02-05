@@ -180,8 +180,12 @@ def main(args):
     elif args.model == 'partition_fusion_attn':
         fusion_tag = "_partition-attn"
 
-    
-    experiment_name = f"{args.model}{fusion_tag}_{args.k_folds}Fold_bs{args.batch_size}_{timestamp}"
+    hand_tag = ""
+    if args.model in ('partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn'):
+        if args.partition_hand_mode != "both":
+            hand_tag = f"_hands-{args.partition_hand_mode}"
+
+    experiment_name = f"{args.model}{fusion_tag}{hand_tag}_{args.k_folds}Fold_bs{args.batch_size}_{timestamp}"
     output_dir = os.path.join('results', 'kfold_experiments', experiment_name)
     os.makedirs(output_dir, exist_ok=True)
     print(f"Experiment Results will be saved to: {output_dir}")
@@ -196,7 +200,8 @@ def main(args):
             mode=args.model,
             max_len=args.max_len,
             fusion_features=args.fusion_features,
-            partition_features_dir=PARTITION_NPY_DIR
+            partition_features_dir=PARTITION_NPY_DIR,
+            partition_hand_mode=args.partition_hand_mode,
         )
     except Exception as e:
          print(f"Dataset Error: {e}"); return
@@ -254,6 +259,13 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=0.0005)
     parser.add_argument('--max_len', type=int, default=300)
     parser.add_argument('--fusion_features', type=str, default='both', choices=['first', 'second', 'both'])
+    parser.add_argument(
+        '--partition_hand_mode',
+        type=str,
+        default='both',
+        choices=['both', 'none', 'left', 'right'],
+        help="Partition 手部特徵選擇: both | none | left | right (外側手請選對應的左右)",
+    )
     parser.add_argument('--use_class_weights', default=True, action='store_true')
     parser.add_argument('--no_class_weights', action='store_true')
     
