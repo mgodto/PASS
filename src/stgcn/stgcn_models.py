@@ -11,6 +11,16 @@ EDGES = [
     [28, 30], [28, 32]
 ]
 
+PART_NODE_GROUPS = {
+    "Full Body": list(range(33)),
+    "Head": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    "Trunk": [11, 12, 23, 24],
+    "Left Arm": [11, 13, 15, 17, 19, 21],
+    "Right Arm": [12, 14, 16, 18, 20, 22],
+    "Left Leg": [23, 25, 27, 29, 31],
+    "Right Leg": [24, 26, 28, 30, 32],
+}
+
 class STGCN_Baseline(nn.Module):
     # (保持不變)
     def __init__(self, num_nodes=33, num_classes=4):
@@ -269,4 +279,167 @@ class STGCN_PartitionFusionConv(nn.Module):
 
         # 3. Fusion
         fused_vector = torch.cat([skeleton_features, part_emb], dim=1)
+        return self.fusion_head(fused_vector)
+
+
+class STGCN_PartitionFusionHierarchical(nn.Module):
+    """
+    Hierarchical partition fusion:
+    1) ST-GCN output keeps part identity via group pooling over nodes.
+    2) Subspace signals stay per-part temporal sequence.
+    3) Each part is fused independently, then concatenated for classification.
+    Expects subspace_features shape: (N, T, subspace_dim).
+    """
+
+    def __init__(
+        self,
+        num_nodes=33,
+        num_classes=4,
+        subspace_dim=14,
+        part_feat_dim=2,
+        selected_part_names=None,
+        st_part_dim=64,
+        part_dyn_dim=64,
+        part_fused_dim=64,
+        conv_channels=16,
+        kernel_size=5,
+        dropout=0.5,
+        use_part_gate=True,
+    ):
+        super().__init__()
+
+        if subspace_dim % part_feat_dim != 0:
+            raise ValueError("subspace_dim must be divisible by part_feat_dim")
+
+        self.part_feat_dim = part_feat_dim
+        self.num_parts = subspace_dim // part_feat_dim
+        self.use_part_gate = bool(use_part_gate)
+
+        if not selected_part_names:
+            raise ValueError("selected_part_names is required for hierarchical partition fusion")
+        if len(selected_part_names) != self.num_parts:
+            raise ValueError(
+                f"selected_part_names length ({len(selected_part_names)}) "
+                f"does not match num_parts ({self.num_parts})"
+            )
+
+        self.selected_part_names = list(selected_part_names)
+        self._part_index_buffer_names = []
+        for idx, part_name in enumerate(self.selected_part_names):
+            if part_name not in PART_NODE_GROUPS:
+                raise ValueError(f"Unknown partition part name: {part_name}")
+            buffer_name = f"part_indices_{idx}"
+            self.register_buffer(
+                buffer_name,
+                torch.tensor(PART_NODE_GROUPS[part_name], dtype=torch.long),
+            )
+            self._part_index_buffer_names.append(buffer_name)
+
+        edge_index_tensor = torch.tensor(EDGES, dtype=torch.long).t().contiguous()
+        self.register_buffer("edge_index", edge_index_tensor)
+
+        self.st_feature_extractor = nn.ModuleList([
+            STGCNBlock(in_channels=3, out_channels=64, kernel_size=9),
+            STGCNBlock(in_channels=64, out_channels=128, kernel_size=9),
+            STGCNBlock(in_channels=128, out_channels=256, kernel_size=9),
+        ])
+
+        self.input_bn = nn.BatchNorm1d(subspace_dim)
+
+        self.part_encoder = nn.Sequential(
+            nn.Conv1d(
+                in_channels=part_feat_dim,
+                out_channels=conv_channels,
+                kernel_size=kernel_size,
+                padding=kernel_size // 2,
+                bias=False,
+            ),
+            nn.BatchNorm1d(conv_channels),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.part_fc = nn.Sequential(
+            nn.Flatten(start_dim=1),
+            nn.Linear(conv_channels, part_dyn_dim),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+        )
+
+        self.st_part_proj = nn.Sequential(
+            nn.Linear(256, st_part_dim),
+            nn.ReLU(),
+        )
+        self.sub_part_proj = nn.Sequential(
+            nn.Linear(part_dyn_dim, st_part_dim),
+            nn.ReLU(),
+        )
+        # Optional per-part scalar gate: alpha_i in [0, 1]
+        if self.use_part_gate:
+            self.part_gate = nn.Sequential(
+                nn.Linear(st_part_dim * 2, st_part_dim),
+                nn.ReLU(),
+                nn.Linear(st_part_dim, 1),
+                nn.Sigmoid(),
+            )
+        else:
+            self.part_gate = None
+        self.part_fusion = nn.Sequential(
+            nn.Linear(st_part_dim, part_fused_dim),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+        )
+
+        fused_dim = self.num_parts * part_fused_dim
+        self.fusion_head = nn.Sequential(
+            nn.Linear(fused_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, num_classes),
+        )
+
+    def _group_pool(self, x):
+        # x: (N, C, T, V)
+        part_features = []
+        for buffer_name in self._part_index_buffer_names:
+            node_indices = getattr(self, buffer_name)
+            part_x = x.index_select(dim=3, index=node_indices)
+            pooled = part_x.mean(dim=[2, 3])  # (N, C)
+            part_features.append(pooled)
+        return torch.stack(part_features, dim=1)  # (N, P, C)
+
+    def forward(self, skeleton_data, subspace_features):
+        # 1) ST-GCN + group pooling by part
+        x = skeleton_data
+        for block in self.st_feature_extractor:
+            x = block(x, self.edge_index)
+        st_part = self._group_pool(x)  # (N, P, 256)
+
+        # 2) Temporal encoding per part from raw subspace sequence
+        if subspace_features.dim() != 3:
+            raise ValueError("subspace_features must have shape (N, T, D)")
+        n, t, d = subspace_features.shape
+        expected_dim = self.num_parts * self.part_feat_dim
+        if d != expected_dim:
+            raise ValueError(f"Expected subspace dim {expected_dim}, got {d}")
+
+        subspace_features = subspace_features.permute(0, 2, 1)  # (N, D, T)
+        subspace_features = self.input_bn(subspace_features)
+        part_seq = subspace_features.contiguous().view(n, self.num_parts, self.part_feat_dim, t)
+        part_seq = part_seq.view(n * self.num_parts, self.part_feat_dim, t)
+        part_dyn = self.part_encoder(part_seq)
+        part_dyn = self.part_fc(part_dyn).view(n, self.num_parts, -1)  # (N, P, part_dyn_dim)
+
+        # 3) Per-part fusion:
+        # Gate mode: F_i = alpha_i * F_sub,i + (1 - alpha_i) * F_gcn,i
+        # No-gate mode: F_i = 0.5 * F_sub,i + 0.5 * F_gcn,i
+        st_part = self.st_part_proj(st_part)       # (N, P, st_part_dim)
+        sub_part = self.sub_part_proj(part_dyn)    # (N, P, st_part_dim)
+        if self.part_gate is not None:
+            gate_input = torch.cat([sub_part, st_part], dim=2)
+            alpha = self.part_gate(gate_input)     # (N, P, 1)
+            fused_part = alpha * sub_part + (1.0 - alpha) * st_part
+        else:
+            fused_part = 0.5 * (sub_part + st_part)
+        fused_part = self.part_fusion(fused_part)  # (N, P, part_fused_dim)
+        fused_vector = fused_part.reshape(n, -1)
         return self.fusion_head(fused_vector)

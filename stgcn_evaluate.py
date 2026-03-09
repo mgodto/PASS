@@ -13,6 +13,7 @@ from src.stgcn.stgcn_models import (
     STGCN_PartitionFusion,
     STGCN_PartitionFusionConv,
     STGCN_PartitionFusionAttention,
+    STGCN_PartitionFusionHierarchical,
 )
 from src.stgcn.stgcn_metrics import (
     format_classification_report_percent,
@@ -34,7 +35,7 @@ def evaluate_model(model, data_loader, device, label_encoder, model_type):
     with torch.no_grad():
         for data in tqdm(data_loader, desc="Evaluating"):
             # 解包數據
-            if model_type in ('late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn'):
+            if model_type in ('late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn', 'partition_fusion_hier'):
                 skeletons, subspace_features, labels = data
                 skeletons = skeletons.to(device)
                 subspace_features = subspace_features.to(device)
@@ -45,7 +46,7 @@ def evaluate_model(model, data_loader, device, label_encoder, model_type):
                 labels = labels.to(device)
 
             # 模型推論
-            if model_type in ('late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn'):
+            if model_type in ('late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn', 'partition_fusion_hier'):
                 outputs = model(skeletons, subspace_features)
             else:
                 outputs = model(skeletons)
@@ -134,6 +135,15 @@ def main(args):
             num_classes=num_classes,
             subspace_dim=num_feats,
         ).to(device)
+    elif args.model == 'partition_fusion_hier':
+        print(f"Initializing STGCN_PartitionFusionHierarchical with {num_feats} features...")
+        model = STGCN_PartitionFusionHierarchical(
+            num_classes=num_classes,
+            subspace_dim=num_feats,
+            part_feat_dim=getattr(full_dataset, "part_feature_dim", 2),
+            selected_part_names=getattr(full_dataset, "selected_part_names", None),
+            use_part_gate=args.hier_use_gate,
+        ).to(device)
         
     # 載入權重
     print(f"Loading weights from: {args.weights}")
@@ -179,11 +189,24 @@ def main(args):
 if __name__ == '__main__':
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, required=True, choices=['baseline', 'late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn'])
+    parser.add_argument('--model', type=str, required=True, choices=['baseline', 'late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn', 'partition_fusion_hier'])
     parser.add_argument('--weights', type=str, required=True)
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--max_len', type=int, default=300)
     parser.add_argument('--fusion_features', type=str, default='both', choices=['first', 'second', 'both'])
+    parser.add_argument(
+        '--hier_use_gate',
+        dest='hier_use_gate',
+        default=True,
+        action='store_true',
+        help="Enable per-part gate in partition_fusion_hier (default: enabled).",
+    )
+    parser.add_argument(
+        '--hier_no_gate',
+        dest='hier_use_gate',
+        action='store_false',
+        help="Disable per-part gate in partition_fusion_hier and use fixed averaging fusion.",
+    )
 
     args = parser.parse_args()
     main(args)

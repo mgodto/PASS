@@ -13,7 +13,7 @@ from src.stgcn.stgcn_metrics import (
 
 def _is_fusion_mode(model_type):
     """判斷是否為融合模型模式"""
-    return model_type in ('late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn')
+    return model_type in ('late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn', 'partition_fusion_hier')
 
 
 def _unpack_batch(data, device, model_type):

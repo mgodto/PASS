@@ -17,6 +17,7 @@ from src.stgcn.stgcn_models import (
     STGCN_PartitionFusion,
     STGCN_PartitionFusionConv,
     STGCN_PartitionFusionAttention,
+    STGCN_PartitionFusionHierarchical,
 )
 from src.stgcn.stgcn_engine import train_one_epoch, evaluate
 from src.config import SVM_FEATURES_PATH, LABELS_PATH, STGCN_PATHS_PATH, PARTITION_NPY_DIR
@@ -46,12 +47,18 @@ def main(args):
         fusion_tag = "_partition-conv"
     elif args.model == 'partition_fusion_attn':
         fusion_tag = "_partition-attn"
+    elif args.model == 'partition_fusion_hier':
+        fusion_tag = "_partition-hier" if args.hier_use_gate else "_partition-hier-nogate"
 
     weight_tag = "_weighted" if args.use_class_weights else ""
     hand_tag = ""
-    if args.model in ('partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn'):
+    if args.model in ('partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn', 'partition_fusion_hier'):
         if args.partition_hand_mode != "both":
             hand_tag = f"_hands-{args.partition_hand_mode}"
+            if args.partition_hand_mode == "outer":
+                hand_tag = f"{hand_tag}-{args.partition_outer_axis}"
+                if args.partition_outer_invert:
+                    hand_tag = f"{hand_tag}-inv"
 
     experiment_name = f"{args.model}{fusion_tag}{hand_tag}{weight_tag}_lr{args.lr}_bs{args.batch_size}_{timestamp}"
     output_dir = os.path.join('results', experiment_name)
@@ -71,6 +78,8 @@ def main(args):
             # ★★★ 傳入 Partition NPY 資料夾路徑
             partition_features_dir=PARTITION_NPY_DIR,
             partition_hand_mode=args.partition_hand_mode,
+            partition_outer_axis=args.partition_outer_axis,
+            partition_outer_invert=args.partition_outer_invert,
         )
     except FileNotFoundError as e:
          print(f"Error initializing dataset: {e}")
@@ -78,6 +87,8 @@ def main(args):
     except Exception as e:
          print(f"An unexpected error occurred: {e}")
          return
+    if args.partition_hand_mode == "outer":
+        dataset.report_outer_hand_stats(preload=True)
 
     # 數據分割
     train_size = int(0.8 * len(dataset))
@@ -121,6 +132,15 @@ def main(args):
         model = STGCN_PartitionFusionAttention(
             num_classes=dataset.num_classes,
             subspace_dim=num_selected_subspace_features,
+        ).to(device)
+    elif args.model == 'partition_fusion_hier':
+        print(f"Initializing STGCN_PartitionFusionHierarchical with {num_selected_subspace_features} features...")
+        model = STGCN_PartitionFusionHierarchical(
+            num_classes=dataset.num_classes,
+            subspace_dim=num_selected_subspace_features,
+            part_feat_dim=getattr(dataset, "part_feature_dim", 2),
+            selected_part_names=getattr(dataset, "selected_part_names", None),
+            use_part_gate=args.hier_use_gate,
         ).to(device)
     
     else:
@@ -217,7 +237,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='ST-GCN Training Script')
     # ★★★ 加入 partition_fusion 選項
     parser.add_argument('--model', type=str, required=True, 
-                        choices=['baseline', 'late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn'],
+                        choices=['baseline', 'late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn', 'partition_fusion_hier'],
                         help='Model type to train')
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')
@@ -229,11 +249,37 @@ if __name__ == '__main__':
         '--partition_hand_mode',
         type=str,
         default='both',
-        choices=['both', 'none', 'left', 'right'],
-        help="Partition 手部特徵選擇: both | none | left | right (外側手請選對應的左右)",
+        choices=['both', 'none', 'left', 'right', 'outer'],
+        help="Partition 手部特徵選擇: both | none | left | right | outer",
+    )
+    parser.add_argument(
+        '--partition_outer_axis',
+        type=str,
+        default='x',
+        choices=['x', 'y', 'z'],
+        help="outer 手判別的移動方向軸: x | y | z",
+    )
+    parser.add_argument(
+        '--partition_outer_invert',
+        default=False,
+        action='store_true',
+        help="若 outer 手判別結果相反，開啟此選項反轉左右",
     )
     parser.add_argument('--use_class_weights', default=True, action='store_true', 
                         help='Apply class weighting to the loss function.')
+    parser.add_argument(
+        '--hier_use_gate',
+        dest='hier_use_gate',
+        default=True,
+        action='store_true',
+        help="Enable per-part gate in partition_fusion_hier (default: enabled).",
+    )
+    parser.add_argument(
+        '--hier_no_gate',
+        dest='hier_use_gate',
+        action='store_false',
+        help="Disable per-part gate in partition_fusion_hier and use fixed averaging fusion.",
+    )
     
     args = parser.parse_args()
     main(args)

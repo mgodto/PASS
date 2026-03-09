@@ -16,6 +16,116 @@ PARTITION_PARTS = (
 )
 PARTITION_HAND_PARTS = ("Left Arm", "Right Arm")
 PARTITION_PART_FEATURE_DIM = 2
+PARTITION_OUTER_AXIS = {
+    "x": 0,
+    "y": 1,
+    "z": 2,
+}
+PARTITION_OUTER_WINDOW_RATIO = 0.1
+PARTITION_HIP_INDICES = (23, 24)
+PARTITION_SHOULDER_INDICES = (11, 12)
+
+
+def compute_center_series(skeleton_data, axis_idx, joint_indices):
+    data = np.asarray(skeleton_data)
+    if data.ndim != 3 or data.shape[0] == 0:
+        return None
+    try:
+        sub = data[:, joint_indices, axis_idx]
+    except Exception:
+        return None
+
+    if not np.isfinite(sub).any():
+        return None
+
+    valid = np.isfinite(sub)
+    sums = np.where(valid, sub, 0.0).sum(axis=1)
+    counts = valid.sum(axis=1)
+    series = np.where(counts > 0, sums / counts, np.nan)
+    return series
+
+
+def _safe_window_stat(series, window, fn="median"):
+    window_vals = series[window]
+    finite = window_vals[np.isfinite(window_vals)]
+    if finite.size == 0:
+        return np.nan
+    if fn == "mean":
+        return float(np.mean(finite))
+    return float(np.median(finite))
+
+
+def infer_outer_hand_side(
+    skeleton_data,
+    axis="x",
+    invert=False,
+    window_ratio=PARTITION_OUTER_WINDOW_RATIO,
+    return_delta=False,
+    return_meta=False,
+):
+    axis_idx = PARTITION_OUTER_AXIS.get(axis, 0)
+    series = compute_center_series(skeleton_data, axis_idx, PARTITION_HIP_INDICES)
+    if series is None:
+        series = compute_center_series(skeleton_data, axis_idx, PARTITION_SHOULDER_INDICES)
+
+    if series is None or series.size < 2:
+        if return_meta:
+            meta = {"fallback": True, "reason": "insufficient_data"}
+        if return_delta:
+            if return_meta:
+                return "right", 0.0, np.nan, np.nan, meta
+            return "right", 0.0, np.nan, np.nan
+        if return_meta:
+            return "right", meta
+        return "right"
+
+    if not np.isfinite(series).any():
+        if return_meta:
+            meta = {"fallback": True, "reason": "all_nan_series"}
+        if return_delta:
+            if return_meta:
+                return "right", 0.0, np.nan, np.nan, meta
+            return "right", 0.0, np.nan, np.nan
+        if return_meta:
+            return "right", meta
+        return "right"
+
+    k = max(1, int(series.shape[0] * window_ratio))
+    start = _safe_window_stat(series, slice(0, k), fn="median")
+    end = _safe_window_stat(series, slice(-k, None), fn="median")
+    if np.isnan(start) or np.isnan(end):
+        start = _safe_window_stat(series, slice(0, k), fn="mean")
+        end = _safe_window_stat(series, slice(-k, None), fn="mean")
+
+    if np.isnan(start) or np.isnan(end):
+        finite = series[np.isfinite(series)]
+        if finite.size > 0:
+            start = float(finite[0])
+            end = float(finite[-1])
+        else:
+            if return_meta:
+                meta = {"fallback": True, "reason": "no_finite_window"}
+            if return_delta:
+                if return_meta:
+                    return "right", 0.0, np.nan, np.nan, meta
+                return "right", 0.0, np.nan, np.nan
+            if return_meta:
+                return "right", meta
+            return "right"
+
+    dx = float(end - start)
+    if invert:
+        dx = -dx
+    side = "right" if dx >= 0 else "left"
+    if return_meta:
+        meta = {"fallback": False, "reason": None}
+    if return_delta:
+        if return_meta:
+            return side, dx, float(start), float(end), meta
+        return side, dx, float(start), float(end)
+    if return_meta:
+        return side, meta
+    return side
 
 # --- 輔助函數：讀取特徵長度 ---
 def read_feature_lengths(info_path='results/train/feature_lengths.txt'):
@@ -49,11 +159,14 @@ class GaitDataset(Dataset):
 
     def __init__(self, stgcn_paths_file, labels_file, subspace_features_file,
                  mode='baseline', max_len=300, fusion_features='both',
-                 partition_features_dir=None, partition_hand_mode='both'): # ★★★ 新增參數
+                 partition_features_dir=None, partition_hand_mode='both',
+                 partition_outer_axis='x', partition_outer_invert=False): # ★★★ 新增參數
         """
         Args:
             partition_features_dir (str): 存放新版 14維特徵 (.npy) 的資料夾路徑。
-            partition_hand_mode (str): 'both' | 'none' | 'left' | 'right'
+            partition_hand_mode (str): 'both' | 'none' | 'left' | 'right' | 'outer'
+            partition_outer_axis (str): 'x' | 'y' | 'z' (outer 手方向判別用的軸)
+            partition_outer_invert (bool): True 代表左右判斷反轉
         """
         print(f"Initializing GaitDataset in mode: {mode}")
         
@@ -71,6 +184,17 @@ class GaitDataset(Dataset):
         self.fusion_features = fusion_features
         self.partition_features_dir = partition_features_dir
         self.partition_hand_mode = partition_hand_mode
+        self.partition_outer_axis = partition_outer_axis
+        self.partition_outer_invert = partition_outer_invert
+
+        if self.partition_outer_axis not in PARTITION_OUTER_AXIS:
+            raise ValueError(
+                f"Invalid partition_outer_axis: {self.partition_outer_axis} (choose from {list(PARTITION_OUTER_AXIS.keys())})"
+            )
+
+        self._outer_side_cache = {}
+        self._outer_fallback_cache = {}
+        self._outer_reason_cache = {}
 
         self.le = LabelEncoder()
         self.labels = self.le.fit_transform(self.labels_str)
@@ -121,18 +245,16 @@ class GaitDataset(Dataset):
                 print(f"嚴重警告: 找不到 Partition 特徵資料夾: {self.partition_features_dir}")
 
             self.part_feature_dim = PARTITION_PART_FEATURE_DIM
-            self.selected_part_names = self._select_partition_parts(self.partition_hand_mode)
-            self.selected_part_indices = self._build_part_indices(self.selected_part_names)
-            self.selected_feature_indices = self._build_feature_indices(self.selected_part_indices)
+            self._init_partition_selection()
 
             # ★★★ 修改：特徵維度依據部位數量動態調整 ★★★
-            self.num_selected_subspace_features = len(self.selected_part_indices) * self.part_feature_dim * 3
+            self.num_selected_subspace_features = self._selected_part_count() * self.part_feature_dim * 3
             print(
                 "Mode 'partition_fusion' active. "
                 f"Input Feature Dim: {self.num_selected_subspace_features} "
-                f"({len(self.selected_part_indices)} parts x {self.part_feature_dim} feats x 3 stats)"
+                f"({self._selected_part_count()} parts x {self.part_feature_dim} feats x 3 stats)"
             )
-            print(f"Selected parts: {self.selected_part_names}")
+            print(f"Selected parts: {self._selected_parts_label()}")
         elif self.mode == 'partition_fusion_attn':
             if not self.partition_features_dir:
                 self.partition_features_dir = PARTITION_NPY_DIR
@@ -140,17 +262,15 @@ class GaitDataset(Dataset):
                 print(f"嚴重警告: 找不到 Partition 特徵資料夾: {self.partition_features_dir}")
 
             self.part_feature_dim = PARTITION_PART_FEATURE_DIM
-            self.selected_part_names = self._select_partition_parts(self.partition_hand_mode)
-            self.selected_part_indices = self._build_part_indices(self.selected_part_names)
-            self.selected_feature_indices = self._build_feature_indices(self.selected_part_indices)
+            self._init_partition_selection()
 
-            self.num_selected_subspace_features = len(self.selected_part_indices) * self.part_feature_dim * 3
+            self.num_selected_subspace_features = self._selected_part_count() * self.part_feature_dim * 3
             print(
                 "Mode 'partition_fusion_attn' active. "
                 f"Input Feature Dim: {self.num_selected_subspace_features} "
-                f"({len(self.selected_part_indices)} parts x {self.part_feature_dim} feats x 3 stats)"
+                f"({self._selected_part_count()} parts x {self.part_feature_dim} feats x 3 stats)"
             )
-            print(f"Selected parts: {self.selected_part_names}")
+            print(f"Selected parts: {self._selected_parts_label()}")
         elif self.mode == 'partition_fusion_conv':
             if not self.partition_features_dir:
                 self.partition_features_dir = PARTITION_NPY_DIR
@@ -158,21 +278,71 @@ class GaitDataset(Dataset):
                 print(f"嚴重警告: 找不到 Partition 特徵資料夾: {self.partition_features_dir}")
 
             self.part_feature_dim = PARTITION_PART_FEATURE_DIM
-            self.selected_part_names = self._select_partition_parts(self.partition_hand_mode)
-            self.selected_part_indices = self._build_part_indices(self.selected_part_names)
-            self.selected_feature_indices = self._build_feature_indices(self.selected_part_indices)
+            self._init_partition_selection()
 
-            self.num_selected_subspace_features = len(self.selected_part_indices) * self.part_feature_dim
+            self.num_selected_subspace_features = self._selected_part_count() * self.part_feature_dim
             self.num_parts = self.num_selected_subspace_features // self.part_feature_dim
             print(
                 "Mode 'partition_fusion_conv' active. "
                 f"Input Feature Dim: {self.num_selected_subspace_features} "
                 f"(parts: {self.num_parts} x {self.part_feature_dim})"
             )
-            print(f"Selected parts: {self.selected_part_names}")
+            print(f"Selected parts: {self._selected_parts_label()}")
+        elif self.mode == 'partition_fusion_hier':
+            if not self.partition_features_dir:
+                self.partition_features_dir = PARTITION_NPY_DIR
+            if not os.path.exists(self.partition_features_dir):
+                print(f"嚴重警告: 找不到 Partition 特徵資料夾: {self.partition_features_dir}")
+
+            if self.partition_hand_mode == "outer":
+                raise ValueError(
+                    "partition_fusion_hier does not support partition_hand_mode='outer' "
+                    "because part identities must remain fixed across samples."
+                )
+
+            self.part_feature_dim = PARTITION_PART_FEATURE_DIM
+            self._init_partition_selection()
+
+            self.num_selected_subspace_features = self._selected_part_count() * self.part_feature_dim
+            self.num_parts = self.num_selected_subspace_features // self.part_feature_dim
+            print(
+                "Mode 'partition_fusion_hier' active. "
+                f"Input Feature Dim: {self.num_selected_subspace_features} "
+                f"(parts: {self.num_parts} x {self.part_feature_dim})"
+            )
+            print(f"Selected parts: {self._selected_parts_label()}")
 
     def __len__(self):
         return len(self.labels)
+
+    def _init_partition_selection(self):
+        self._feature_indices_by_hand_mode = {}
+        for mode in ("both", "none", "left", "right"):
+            part_names = self._select_partition_parts(mode)
+            part_indices = self._build_part_indices(part_names)
+            self._feature_indices_by_hand_mode[mode] = self._build_feature_indices(part_indices)
+
+        if self.partition_hand_mode == "outer":
+            self.selected_part_names = None
+            self.selected_part_indices = None
+            self.selected_feature_indices = None
+            return
+
+        self.selected_part_names = self._select_partition_parts(self.partition_hand_mode)
+        self.selected_part_indices = self._build_part_indices(self.selected_part_names)
+        self.selected_feature_indices = self._build_feature_indices(self.selected_part_indices)
+
+    def _selected_part_count(self):
+        if self.partition_hand_mode == "outer":
+            return len(self._feature_indices_by_hand_mode["left"]) // self.part_feature_dim
+        if self.selected_part_indices is None:
+            return 0
+        return len(self.selected_part_indices)
+
+    def _selected_parts_label(self):
+        if self.partition_hand_mode == "outer":
+            return "dynamic (outer: left/right per sample)"
+        return self.selected_part_names
 
     @staticmethod
     def _select_partition_parts(hand_mode):
@@ -210,10 +380,12 @@ class GaitDataset(Dataset):
             feature_indices.extend([base, base + 1])
         return np.asarray(feature_indices, dtype=int)
 
-    def _select_feature_columns(self, feat_seq):
-        if self.mode not in ("partition_fusion", "partition_fusion_attn", "partition_fusion_conv"):
+    def _select_feature_columns(self, feat_seq, feature_indices=None):
+        if self.mode not in ("partition_fusion", "partition_fusion_attn", "partition_fusion_conv", "partition_fusion_hier"):
             return feat_seq
-        if not hasattr(self, "selected_feature_indices"):
+        if feature_indices is None:
+            feature_indices = getattr(self, "selected_feature_indices", None)
+        if feature_indices is None:
             return feat_seq
 
         feat_seq = np.asarray(feat_seq)
@@ -222,14 +394,82 @@ class GaitDataset(Dataset):
 
         raw_dim = feat_seq.shape[1]
         expected_raw_dim = len(PARTITION_PARTS) * PARTITION_PART_FEATURE_DIM
-        expected_selected_dim = len(self.selected_feature_indices)
+        expected_selected_dim = len(feature_indices)
         if raw_dim == expected_raw_dim:
-            return feat_seq[:, self.selected_feature_indices]
+            return feat_seq[:, feature_indices]
         if raw_dim == expected_selected_dim:
             return feat_seq
         raise ValueError(
             f"Unexpected feature dim {raw_dim} (expected {expected_raw_dim} or {expected_selected_dim})"
         )
+
+    def _get_feature_indices_for_sample(self, skeleton_data, index=None):
+        if self.partition_hand_mode != "outer":
+            return self.selected_feature_indices
+        if index is not None and index in self._outer_side_cache:
+            hand_side = self._outer_side_cache[index]
+            return self._feature_indices_by_hand_mode[hand_side]
+
+        hand_side, meta = self._infer_outer_hand_side(skeleton_data, return_meta=True)
+        if index is not None:
+            self._outer_side_cache[index] = hand_side
+            self._outer_fallback_cache[index] = bool(meta.get("fallback"))
+            self._outer_reason_cache[index] = meta.get("reason")
+        return self._feature_indices_by_hand_mode[hand_side]
+
+    def _infer_outer_hand_side(self, skeleton_data, return_meta=False):
+        return infer_outer_hand_side(
+            skeleton_data,
+            axis=self.partition_outer_axis,
+            invert=self.partition_outer_invert,
+            return_meta=return_meta,
+        )
+
+    def _ensure_outer_cache(self, index):
+        if index in self._outer_side_cache:
+            return
+        try:
+            skeleton_data = np.load(self.stgcn_paths[index])
+        except Exception:
+            self._outer_side_cache[index] = "right"
+            self._outer_fallback_cache[index] = True
+            self._outer_reason_cache[index] = "load_fail"
+            return
+        hand_side, meta = self._infer_outer_hand_side(skeleton_data, return_meta=True)
+        self._outer_side_cache[index] = hand_side
+        self._outer_fallback_cache[index] = bool(meta.get("fallback"))
+        self._outer_reason_cache[index] = meta.get("reason")
+
+    def report_outer_hand_stats(self, preload=False):
+        if self.partition_hand_mode != "outer":
+            print("Outer-hand stats: partition_hand_mode is not 'outer'.")
+            return
+        if preload:
+            for idx in range(len(self)):
+                self._ensure_outer_cache(idx)
+
+        total = len(self._outer_side_cache)
+        if total == 0:
+            print("Outer-hand stats: no samples evaluated yet.")
+            return
+
+        fallback_count = sum(1 for v in self._outer_fallback_cache.values() if v)
+        left_count = sum(1 for v in self._outer_side_cache.values() if v == "left")
+        right_count = sum(1 for v in self._outer_side_cache.values() if v == "right")
+
+        reason_counts = {}
+        for reason in self._outer_reason_cache.values():
+            if reason:
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
+        print(
+            "Outer-hand stats: "
+            f"total={total}, left={left_count}, right={right_count}, "
+            f"fallback={fallback_count} ({fallback_count / total:.2%})"
+        )
+        if reason_counts:
+            details = ", ".join([f"{k}={v}" for k, v in sorted(reason_counts.items())])
+            print(f"Outer-hand fallback reasons: {details}")
 
     def __getitem__(self, index):
         # 1. 讀取骨架數據 (保持不變)
@@ -237,7 +477,7 @@ class GaitDataset(Dataset):
             skeleton_data = np.load(self.stgcn_paths[index])
         except Exception:
             # 回傳全 0 以避免崩潰 (根據 mode 回傳不同維度的特徵占位符)
-            if self.mode == 'partition_fusion_conv':
+            if self.mode in ('partition_fusion_conv', 'partition_fusion_hier'):
                 feat_dim = self.num_selected_subspace_features if self.num_selected_subspace_features > 0 else 1
                 return (
                     torch.zeros((3, self.max_len, 33)),
@@ -251,6 +491,8 @@ class GaitDataset(Dataset):
                 feat_dim = self.num_selected_subspace_features if self.num_selected_subspace_features > 0 else 1
                 return torch.zeros((3, self.max_len, 33)), torch.zeros((feat_dim,)), torch.tensor(-1, dtype=torch.long)
             return torch.zeros((3, self.max_len, 33)), torch.tensor(-1, dtype=torch.long)
+
+        raw_skeleton_data = skeleton_data
 
         # Padding / Truncating
         num_frames = skeleton_data.shape[0]
@@ -289,7 +531,8 @@ class GaitDataset(Dataset):
             try:
                 # 讀取特徵 (Frames, 14)
                 feat_seq = np.load(feature_path)
-                feat_seq = self._select_feature_columns(feat_seq)
+                feature_indices = self._get_feature_indices_for_sample(raw_skeleton_data, index=index)
+                feat_seq = self._select_feature_columns(feat_seq, feature_indices)
                 
                 if feat_seq.shape[0] > 0:
                     # ★★★ 核心修改：統計池化 (Statistical Pooling) ★★★
@@ -319,7 +562,8 @@ class GaitDataset(Dataset):
 
             try:
                 feat_seq = np.load(feature_path)
-                feat_seq = self._select_feature_columns(feat_seq)
+                feature_indices = self._get_feature_indices_for_sample(raw_skeleton_data, index=index)
+                feat_seq = self._select_feature_columns(feat_seq, feature_indices)
 
                 if feat_seq.shape[0] > 0:
                     feat_max = np.max(feat_seq, axis=0)
@@ -336,14 +580,15 @@ class GaitDataset(Dataset):
                 selected_subspace_feature = torch.zeros((self.num_selected_subspace_features,), dtype=torch.float)
 
             return tensor_data, selected_subspace_feature, label
-        elif self.mode == 'partition_fusion_conv':
+        elif self.mode in ('partition_fusion_conv', 'partition_fusion_hier'):
             filename = os.path.basename(self.stgcn_paths[index])
             feature_filename = filename.replace('.npy', '_subspace_features.npy')
             feature_path = os.path.join(self.partition_features_dir, feature_filename)
 
             try:
                 feat_seq = np.load(feature_path)
-                feat_seq = self._select_feature_columns(feat_seq)
+                feature_indices = self._get_feature_indices_for_sample(raw_skeleton_data, index=index)
+                feat_seq = self._select_feature_columns(feat_seq, feature_indices)
 
                 if feat_seq.shape[1] != self.num_selected_subspace_features:
                     raise ValueError(

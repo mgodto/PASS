@@ -16,6 +16,7 @@ from src.stgcn.stgcn_models import (
     STGCN_PartitionFusion,
     STGCN_PartitionFusionConv,
     STGCN_PartitionFusionAttention,
+    STGCN_PartitionFusionHierarchical,
 )
 # ★★★ 注意：這裡導入的 evaluate 已經是我們剛修改過會回傳 F1 的版本 ★★★
 from src.stgcn.stgcn_engine import train_one_epoch, evaluate
@@ -87,6 +88,14 @@ def train_fold(fold_idx, train_dataset, test_dataset, dataset_full, args, output
         model = STGCN_PartitionFusionAttention(
             num_classes=num_classes,
             subspace_dim=num_selected_subspace_features,
+        ).to(device)
+    elif args.model == 'partition_fusion_hier':
+        model = STGCN_PartitionFusionHierarchical(
+            num_classes=num_classes,
+            subspace_dim=num_selected_subspace_features,
+            part_feat_dim=getattr(dataset_full, "part_feature_dim", 2),
+            selected_part_names=getattr(dataset_full, "selected_part_names", None),
+            use_part_gate=args.hier_use_gate,
         ).to(device)
     else:
         raise ValueError("Invalid model type")
@@ -179,11 +188,17 @@ def main(args):
         fusion_tag = "_partition-conv"
     elif args.model == 'partition_fusion_attn':
         fusion_tag = "_partition-attn"
+    elif args.model == 'partition_fusion_hier':
+        fusion_tag = "_partition-hier" if args.hier_use_gate else "_partition-hier-nogate"
 
     hand_tag = ""
-    if args.model in ('partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn'):
+    if args.model in ('partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn', 'partition_fusion_hier'):
         if args.partition_hand_mode != "both":
             hand_tag = f"_hands-{args.partition_hand_mode}"
+            if args.partition_hand_mode == "outer":
+                hand_tag = f"{hand_tag}-{args.partition_outer_axis}"
+                if args.partition_outer_invert:
+                    hand_tag = f"{hand_tag}-inv"
 
     experiment_name = f"{args.model}{fusion_tag}{hand_tag}_{args.k_folds}Fold_bs{args.batch_size}_{timestamp}"
     output_dir = os.path.join('results', 'kfold_experiments', experiment_name)
@@ -202,9 +217,13 @@ def main(args):
             fusion_features=args.fusion_features,
             partition_features_dir=PARTITION_NPY_DIR,
             partition_hand_mode=args.partition_hand_mode,
+            partition_outer_axis=args.partition_outer_axis,
+            partition_outer_invert=args.partition_outer_invert,
         )
     except Exception as e:
          print(f"Dataset Error: {e}"); return
+    if args.partition_hand_mode == "outer":
+        dataset.report_outer_hand_stats(preload=True)
 
     # K-Fold
     print(f"Initializing {args.k_folds}-Fold Cross Validation...")
@@ -243,6 +262,8 @@ def main(args):
     # 儲存摘要
     with open(os.path.join(output_dir, 'final_summary.txt'), 'w') as f:
         f.write(f"Model: {args.model}\n")
+        if args.model == 'partition_fusion_hier':
+            f.write(f"Hierarchical Part Gate: {args.hier_use_gate}\n")
         f.write(f"K-Folds: {args.k_folds}\n")
         f.write(f"Average Accuracy: {mean_acc:.2%} (+/- {std_acc:.2%})\n")
         f.write(f"Average F1 Score: {mean_f1:.2%} (+/- {std_f1:.2%})\n\n")
@@ -252,9 +273,9 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, required=True, choices=['baseline', 'late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn'])
+    parser.add_argument('--model', type=str, required=True, choices=['baseline', 'late_fusion', 'partition_fusion', 'partition_fusion_conv', 'partition_fusion_attn', 'partition_fusion_hier'])
     parser.add_argument('--k_folds', type=int, default=5)
-    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--lr', type=float, default=0.0005)
     parser.add_argument('--max_len', type=int, default=300)
@@ -263,11 +284,37 @@ if __name__ == '__main__':
         '--partition_hand_mode',
         type=str,
         default='both',
-        choices=['both', 'none', 'left', 'right'],
-        help="Partition 手部特徵選擇: both | none | left | right (外側手請選對應的左右)",
+        choices=['both', 'none', 'left', 'right', 'outer'],
+        help="Partition 手部特徵選擇: both | none | left | right | outer",
+    )
+    parser.add_argument(
+        '--partition_outer_axis',
+        type=str,
+        default='x',
+        choices=['x', 'y', 'z'],
+        help="outer 手判別的移動方向軸: x | y | z",
+    )
+    parser.add_argument(
+        '--partition_outer_invert',
+        default=False,
+        action='store_true',
+        help="若 outer 手判別結果相反，開啟此選項反轉左右",
     )
     parser.add_argument('--use_class_weights', default=True, action='store_true')
     parser.add_argument('--no_class_weights', action='store_true')
+    parser.add_argument(
+        '--hier_use_gate',
+        dest='hier_use_gate',
+        default=True,
+        action='store_true',
+        help="Enable per-part gate in partition_fusion_hier (default: enabled).",
+    )
+    parser.add_argument(
+        '--hier_no_gate',
+        dest='hier_use_gate',
+        action='store_false',
+        help="Disable per-part gate in partition_fusion_hier and use fixed averaging fusion.",
+    )
     
     args = parser.parse_args()
     if args.no_class_weights:
